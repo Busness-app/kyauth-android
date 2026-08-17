@@ -6,18 +6,22 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.DialogInterface
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -53,8 +57,10 @@ import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.pairing.QrPairing
 import org.kysecurity.authenticator.pairing.QrPairingParser
 import org.kysecurity.authenticator.pairing.PushTokenProvider
+import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.PasswordEntry
+import org.kysecurity.authenticator.passwords.PasswordGenerator
 import org.kysecurity.authenticator.security.AppLockManager
 import org.kysecurity.authenticator.security.PinFailurePolicy
 import org.kysecurity.authenticator.security.PinPolicy
@@ -571,19 +577,42 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = fullWidthParams(bottom = 12)
                 setOnClickListener {
                     authenticateWithBiometrics(
-                        reason = "Reveal password for ${entry.title}",
+                        reason = if (entry.isPasskey) "View passkey for ${entry.title}" else "Reveal password for ${entry.title}",
                         onSuccess = { showPasswordDetails(entry) },
                     )
                 }
             }
-            card.addView(TextView(this).apply {
+
+            val headerRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            headerRow.addView(TextView(this).apply {
                 text = entry.title
                 textSize = 18f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(ThemeManager.color(context, R.color.ky_text))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
+
+            if (entry.isPasskey) {
+                headerRow.addView(TextView(this).apply {
+                    text = "PASSKEY"
+                    textSize = 11f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(ThemeManager.color(context, R.color.ky_cyan))
+                    background = GradientDrawable().apply {
+                        setColor(ThemeManager.color(context, R.color.ky_surface_elevated))
+                        cornerRadius = dp(6).toFloat()
+                        setStroke(dp(1), ThemeManager.color(context, R.color.ky_cyan))
+                    }
+                    setPadding(dp(8), dp(2), dp(8), dp(2))
+                })
+            }
+            card.addView(headerRow)
+
             card.addView(TextView(this).apply {
-                text = entry.username.ifBlank { "No username" }
+                text = entry.username.ifBlank { if (entry.isPasskey) "Passkey credential" else "No username" }
                 textSize = 14f
                 setTextColor(ThemeManager.color(context, R.color.ky_muted))
                 setPadding(0, dp(4), 0, 0)
@@ -673,17 +702,37 @@ class MainActivity : AppCompatActivity() {
             textSize = 15f
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
         })
-        container.addView(TextView(this).apply {
-            text = entry.password
-            textSize = 22f
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
-            setTextColor(ThemeManager.color(context, R.color.ky_text))
-            setPadding(0, dp(16), 0, dp(16))
-        })
+
+        if (entry.isPasskey) {
+            val passkey = entry.passkey!!
+            container.addView(TextView(this).apply {
+                text = "FIDO2 / WebAuthn Passkey"
+                textSize = 18f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(ThemeManager.color(context, R.color.ky_cyan))
+                setPadding(0, dp(12), 0, dp(4))
+            })
+            container.addView(TextView(this).apply {
+                text = "Relying Party: ${passkey.rpId}\nSignatures: ${passkey.signCount}"
+                textSize = 14f
+                setTextColor(ThemeManager.color(context, R.color.ky_text))
+                setPadding(0, 0, 0, dp(12))
+            })
+        } else {
+            container.addView(TextView(this).apply {
+                text = entry.password
+                textSize = 22f
+                typeface = Typeface.MONOSPACE
+                setTextIsSelectable(true)
+                setTextColor(ThemeManager.color(context, R.color.ky_text))
+                setPadding(0, dp(16), 0, dp(16))
+            })
+        }
+
         entry.url?.let { container.addView(message(it)) }
         entry.notes?.let { container.addView(message(it)) }
-        AlertDialog.Builder(this)
+
+        val builder = AlertDialog.Builder(this)
             .setTitle(entry.title)
             .setView(container)
             .setNegativeButton("Delete") { _, _ ->
@@ -691,21 +740,19 @@ class MainActivity : AppCompatActivity() {
                 savePasswordEntries()
                 renderContent()
             }
-            .setNeutralButton("Copy") { _, _ ->
+
+        if (!entry.isPasskey && entry.password.isNotBlank()) {
+            builder.setNeutralButton("Copy") { _, _ ->
                 copySensitiveText(entry.password, 30)
                 Toast.makeText(this, "Password copied for 30 seconds", Toast.LENGTH_SHORT).show()
             }
-            .setPositiveButton("Close", null)
-            .show()
+        }
+
+        builder.setPositiveButton("Close", null).show()
     }
 
-    private fun generatePassword(length: Int = 20): String {
-        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%+=_-"
-        val random = SecureRandom()
-        return buildString(length) {
-            repeat(length) { append(alphabet[random.nextInt(alphabet.length)]) }
-        }
-    }
+    private fun generatePassword(length: Int = 20): String =
+        PasswordGenerator.generate(length = length)
 
     // ==========================================
     // Tab 4: Push MFA Approvals
@@ -899,6 +946,14 @@ class MainActivity : AppCompatActivity() {
         vaultSection.addView(totpActions)
         sections.add(vaultSection)
 
+        val providerSection = settingsCard()
+        providerSection.addView(title("Password & Passkey Provider"))
+        providerSection.addView(message("Set KyAuth as your default system provider to autofill passwords and use passkeys across apps and websites."))
+        providerSection.addView(primaryButton("Set as default provider").apply {
+            setOnClickListener { openCredentialProviderSettings() }
+        }, fullWidthParams())
+        sections.add(providerSection)
+
         val accountSection = settingsCard()
         accountSection.addView(title("Paired Account"))
         accountSection.addView(message("Server: ${account.serverUrl}\nDevice ID: ${account.deviceId}\nDevice Name: ${account.deviceName}\nUser ID: ${account.userId ?: "N/A"}"))
@@ -996,6 +1051,27 @@ class MainActivity : AppCompatActivity() {
                 renderContent()
             }
             .show()
+    }
+
+    private fun openCredentialProviderSettings() {
+        val autofillIntent = Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        val credentialIntent = Intent("android.settings.CREDENTIAL_PROVIDER")
+
+        runCatching {
+            startActivity(autofillIntent)
+            return
+        }
+        runCatching {
+            startActivity(credentialIntent)
+            return
+        }
+        runCatching {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        }.onFailure {
+            Toast.makeText(this, "Could not open system credential settings", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // ==========================================

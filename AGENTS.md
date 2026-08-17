@@ -18,10 +18,12 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - The PIN is an optional second local factor. Failed PIN attempts use delays of 0, 5, 30, and 300 seconds. The fifth failure wipes local data.
 - Release builds disable screenshots and Android backup.
 - Push MFA receives KySignOn FCM data-message challenges, posts a local notification, and opens the Push MFA tab for approve/deny.
-- Passwords use `passwords_vault.kdbx` and a separate random vault key. The password vault stores KeePass title, username, password, URL, and notes fields.
-- The Passwords tab supports local add, generate, list, reveal, copy, and delete actions. Reveal and copy require a biometric or device-authentication prompt.
+- Passwords and Passkeys use `passwords_vault.kdbx` and a separate random vault key. The password vault stores KeePass title, username, password, URL, notes, and FIDO2 Passkey custom fields (`Passkey-*`).
+- Passkeys use native ES256 / P-256 WebAuthn cryptography with COSE public key encoding and ECDSA assertion signing.
+- KyAuth acts as an Android 14+ (API 34+) system Credential Provider for both Passkeys and Passwords via `KyAuthCredentialProviderService` (with `CredentialAuthActivity`) and an Android 12+ (API 31+) system Autofill Service via `KyAuthAutofillService`.
+- The Passwords tab supports local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
-- KyPasswords sync and Android Autofill are later features.
+- KyPasswords remote sync is a later feature.
 
 ## UI contract
 
@@ -39,7 +41,8 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - `mfa/`: push challenge model, FCM receive service, signed payload, and response client.
 - `security/`: lock state, PIN policy, key wrapping, and local wipe.
 - `totp/`: TOTP parsing, generation, and KDBX persistence.
-- `passwords/`: separate password entry model and KDBX persistence.
+- `passwords/`: password/passkey entry models, domain matcher, password generator, autofill service, and KDBX persistence.
+- `passkeys/`: FIDO2 WebAuthn crypto engine, CredentialProviderService, slice builder, and auth activity.
 - `ThemeManager.kt`: the shared 15-theme palette and local theme preference.
 - `AboutDialog.kt`: GPL-3.0-only About dialog.
 

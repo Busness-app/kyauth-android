@@ -35,7 +35,9 @@ object KdbxPasswordVault {
             group.entries.forEach { entry ->
                 val title = entry.fields[BasicField.Title.name]?.content.orEmpty()
                 val password = entry.fields[BasicField.Password.name]?.content.orEmpty()
-                if (title.isNotBlank() && password.isNotBlank()) {
+                val customMap = entry.fields.entries.associate { (k, v) -> k to v.content }
+                val passkey = PasskeyData.fromKeepassCustomFields(customMap)
+                if (title.isNotBlank() && (password.isNotBlank() || passkey != null)) {
                     entries.add(
                         PasswordEntry(
                             title = title,
@@ -43,6 +45,7 @@ object KdbxPasswordVault {
                             password = password,
                             url = entry.fields[BasicField.Url.name]?.content?.ifBlank { null },
                             notes = entry.fields[BasicField.Notes.name]?.content?.ifBlank { null },
+                            passkey = passkey,
                             id = entry.uuid.toString(),
                         ),
                     )
@@ -64,6 +67,9 @@ object KdbxPasswordVault {
             )
             password.url?.let { fields[BasicField.Url.name] = EntryValue.Plain(it) }
             password.notes?.let { fields[BasicField.Notes.name] = EntryValue.Plain(it) }
+            password.passkey?.toKeepassCustomFields()?.forEach { (k, v) ->
+                fields[k] = EntryValue.Plain(v)
+            }
             Entry(
                 uuid = runCatching { UUID.fromString(password.id) }.getOrDefault(UUID.randomUUID()),
                 fields = EntryFields(fields),

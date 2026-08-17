@@ -16,12 +16,38 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".passkeys.CredentialAuthActivity"
+            android:exported="false"
+            android:theme="@style/Theme.KyAuth" />
         <service
             android:name=".mfa.KyAuthMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
+        </service>
+        <service
+            android:name=".passkeys.KyAuthCredentialProviderService"
+            android:permission="android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.credentials.CredentialProviderService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.credentials.provider"
+                android:resource="@xml/credential_provider" />
+        </service>
+        <service
+            android:name=".passwords.KyAuthAutofillService"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.autofill"
+                android:resource="@xml/autofill_service" />
         </service>
     </application>
 </manifest>
