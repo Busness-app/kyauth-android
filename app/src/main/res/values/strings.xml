@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">KyAuth</string>
+    <string name="pairing_title">Pair KySignOn</string>
+    <string name="app_status">KyAuth is locked. Pair a KySignOn account to begin.</string>
+    <string name="tab_totp">TOTP Vault</string>
+    <string name="tab_approvals">Push MFA</string>
+    <string name="tab_passwords">Passwords</string>
+    <string name="tab_settings">Settings</string>
+    <string name="scan_qr">Scan QR Code</string>
+    <string name="add_manually">Add Manually</string>
+    <string name="unlock_title">Unlock KyAuth</string>
+    <string name="unlock_biometrics">Unlock with Biometrics</string>
+    <string name="unlock_pin">Enter PIN</string>
+    <string name="unpair_account">Unpair Account</string>
+    <string name="change_pin">Change PIN</string>
+    <string name="enable_pin">Require PIN as second factor</string>
+    <string name="lock_now">Lock Now</string>
+    <string name="copy_code">Code copied to clipboard</string>
+    <string name="no_totp_entries">No TOTP entries. Tap + to add an account.</string>
+    <string name="no_pending_challenges">No pending MFA sign-in requests.</string>
+    <string name="about_title">KyAuth</string>
+    <string name="about_version_badge">v%1$s</string>
+    <string name="about_body">Developed by Busnes.app\n©%1$s - Licensed Under the GPL 3.0</string>
+    <string name="about_license_label">GNU General Public License v3.0</string>
+</resources>

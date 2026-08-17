@@ -1,0 +1,12 @@
+<resources>
+    <color name="ky_background">#0D0F14</color>
+    <color name="ky_surface">#161A22</color>
+    <color name="ky_surface_elevated">#1E232E</color>
+    <color name="ky_border">#2A3241</color>
+    <color name="ky_cyan">#4DEEEA</color>
+    <color name="ky_cyan_dim">#288A88</color>
+    <color name="ky_text">#E8EDF2</color>
+    <color name="ky_muted">#9BA8B5</color>
+    <color name="ky_error">#FF8A80</color>
+    <color name="ky_success">#81C784</color>
+</resources>

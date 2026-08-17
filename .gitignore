@@ -1,0 +1,57 @@
+# IDE / editor
+*.iml
+.idea/
+
+# Gradle / Kotlin build state
+.gradle/
+.kotlin/
+
+# Local machine config
+local.properties
+/local.properties
+
+# Build outputs
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+# Android Studio's Generate Signed Bundle/APK wizard writes here, NOT into build/, so the
+# rules above miss it and git offers to commit a multi-megabyte signed artifact.
+app/release/
+
+# Logs
+*.log
+
+# Signing / local secrets
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+app/google-services.json
+.artifacts/
+
+# OS artifacts
+.DS_Store
+
+# Editor
+.vscode/
+
+# APK / native debug artifacts
+*.apk
+# App Bundles were not covered while *.apk was, so a wizard-built .aab was committable.
+*.aab
+*.ap_
+*.dex
+*.hprof
+
+# Claude Code worktrees
+.claude/
+.claude/worktrees/
+.worktrees/
+.superpowers/
+.scratch/
+
+# Deploy-walkthrough artifacts: real-device screenshots of a live inbox, home screen
+# and pairing QR. These are never committable — treat as secrets, not build output.
+.artifacts/

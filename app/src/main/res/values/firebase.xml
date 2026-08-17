@@ -1,0 +1,7 @@
+<resources>
+    <string name="google_app_id">1:869390233642:android:60d5f84559046a1571d353</string>
+    <string name="gcm_defaultSenderId">869390233642</string>
+    <string name="google_api_key">AIzaSyCZLZBRoE0R0i7d12WndI8JGJWJutvVE5E</string>
+    <string name="project_id">device-streaming-e3aa5b87</string>
+    <string name="google_storage_bucket">device-streaming-e3aa5b87.firebasestorage.app</string>
+</resources>
