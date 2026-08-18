@@ -12,6 +12,8 @@ data class TotpEntry(
     val periodSeconds: Long = 30,
     val algorithm: Algorithm = Algorithm.SHA1,
     val issuer: String? = null,
+    val url: String? = null,
+    val notes: String? = null,
     val id: String = UUID.randomUUID().toString(),
 ) {
     init {
@@ -32,7 +34,13 @@ data class TotpEntry(
     }
 
     companion object {
-        fun fromKeepassFields(title: String, fields: Map<String, String>, id: String = UUID.randomUUID().toString()): TotpEntry? {
+        fun fromKeepassFields(
+            title: String,
+            fields: Map<String, String>,
+            id: String = UUID.randomUUID().toString(),
+            url: String? = null,
+            notes: String? = null,
+        ): TotpEntry? {
             val secret = fields["TimeOtp-Secret-Base32"] ?: return null
             return TotpEntry(
                 title = title,
@@ -46,6 +54,8 @@ data class TotpEntry(
                     else -> Algorithm.SHA1
                 },
                 issuer = fields["TimeOtp-Issuer"],
+                url = url ?: fields["URL"] ?: fields["Url"],
+                notes = notes ?: fields["Notes"],
                 id = id,
             )
         }

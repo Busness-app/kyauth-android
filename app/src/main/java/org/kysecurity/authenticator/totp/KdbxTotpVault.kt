@@ -38,13 +38,15 @@ object KdbxTotpVault {
         fun extractEntries(group: Group) {
             for (entry in group.entries) {
                 val title = entry.fields[BasicField.Title.name]?.content ?: "Unnamed"
+                val url = entry.fields[BasicField.Url.name]?.content?.ifBlank { null }
+                val notes = entry.fields[BasicField.Notes.name]?.content?.ifBlank { null }
                 val customMap = mutableMapOf<String, String>()
                 for ((key, value) in entry.fields) {
                     if (key.startsWith("TimeOtp-")) {
                         customMap[key] = value.content
                     }
                 }
-                TotpEntry.fromKeepassFields(title, customMap, entry.uuid.toString())?.let {
+                TotpEntry.fromKeepassFields(title, customMap, entry.uuid.toString(), url = url, notes = notes)?.let {
                     entries.add(it)
                 }
             }
@@ -64,6 +66,8 @@ object KdbxTotpVault {
             val fieldsMap = mutableMapOf<String, EntryValue>(
                 BasicField.Title.name to EntryValue.Plain(totp.title),
             )
+            totp.url?.let { fieldsMap[BasicField.Url.name] = EntryValue.Plain(it) }
+            totp.notes?.let { fieldsMap[BasicField.Notes.name] = EntryValue.Plain(it) }
             for ((k, v) in totp.keepassFields()) {
                 fieldsMap[k] = EntryValue.Plain(v)
             }

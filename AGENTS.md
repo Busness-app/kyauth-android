@@ -12,25 +12,24 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - Release builds require HTTPS. Debug builds permit loopback HTTP only.
 - The optional registration URL must use the same origin as the pairing server.
 - The app generates a hardware-backed P-256 device signing key.
-- TOTP entries use KeePass `TimeOtp-*` fields in `totp_vault.kdbx`.
+- TOTP entries use KeePass `TimeOtp-*` fields in `totp_vault.kdbx`, along with standard KeePass title, URL, and notes.
 - The TOTP vault uses an app-private file and an independent random vault key.
 - The app locks when it moves to the background. It clears in-memory TOTP data and its copied code.
 - The PIN is an optional second local factor. Failed PIN attempts use delays of 0, 5, 30, and 300 seconds. The fifth failure wipes local data.
 - Release builds disable screenshots and Android backup.
 - Push MFA receives KySignOn FCM data-message challenges, posts a local notification, and opens the Push MFA tab for approve/deny.
-- Passwords and Passkeys use `passwords_vault.kdbx` and a separate random vault key. The password vault stores KeePass title, username, password, URL, notes, and FIDO2 Passkey custom fields (`Passkey-*`).
+- Passwords and Passkeys use `passwords_vault.kdbx`. The app does not generate its own password keyfile; it obtains its keyfile from a paired KyPasswords server (`/api/devices/pairing/redeem` and `/api/vault/metadata` envelope unwrapping).
 - Passkeys use native ES256 / P-256 WebAuthn cryptography with COSE public key encoding and ECDSA assertion signing.
 - KyAuth acts as an Android 14+ (API 34+) system Credential Provider for both Passkeys and Passwords via `KyAuthCredentialProviderService` (with `CredentialAuthActivity`) and an Android 12+ (API 31+) system Autofill Service via `KyAuthAutofillService`.
-- The Passwords tab supports local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
+- The Passwords tab supports pairing with KyPasswords, syncing vaults, local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
-- KyPasswords remote sync is a later feature.
 
 ## UI contract
 
 - Use the `KyAuth` name in user-visible text.
 - Keep the KySignOn mark and KyAuth wordmark in the header and lock screen.
 - Use the five-part bottom pill: TOTP Vault, Push MFA, lock shield, Passwords, Settings.
-- Keep TOTP scan and manual-add actions in Settings.
+- The TOTP Vault screen provides a + icon to scan QR or add accounts manually with optional Website and Notes fields.
 - Use the 15 suite themes from `ThemeManager`. The default is Patina Ky.
 - Use rounded, flat buttons. Do not add elevation shadows to custom controls.
 

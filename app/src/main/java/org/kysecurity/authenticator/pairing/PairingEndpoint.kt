@@ -4,14 +4,20 @@ import java.net.URI
 import org.kysecurity.authenticator.BuildConfig
 
 object PairingEndpoint {
-    fun registrationUrl(serverUrl: String): URI {
+    fun validateServerUrl(serverUrl: String): String {
         val server = URI(serverUrl.trim())
         require(server.host != null && server.userInfo == null && server.query == null && server.fragment == null) {
             "Enter a complete server URL without credentials or a path query"
         }
         require(server.scheme == "https" || (BuildConfig.DEBUG && server.scheme == "http" && isLoopback(server.host))) {
-            "KySignOn must use HTTPS except for loopback development"
+            "Server must use HTTPS except for loopback development"
         }
+        return serverUrl.trim().trimEnd('/')
+    }
+
+    fun registrationUrl(serverUrl: String): URI {
+        val validated = validateServerUrl(serverUrl)
+        val server = URI(validated)
         val basePath = server.path.orEmpty().trimEnd('/')
         return URI(server.scheme, null, server.host, server.port, "$basePath/api/notifications/native/register", null, null)
     }

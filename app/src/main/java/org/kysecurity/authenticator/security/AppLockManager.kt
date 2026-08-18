@@ -71,6 +71,28 @@ object AppLockManager {
         saveFailureState(context, PinFailureState(0, 0L))
     }
 
+    fun hasPasswordVaultKey(context: Context): Boolean {
+        if (activePasswordVaultKey != null) return true
+        val prefs = getPrefs(context)
+        return prefs.getString(KEY_BIOMETRIC_WRAPPED_PASSWORD_VAULT_KEY, null) != null ||
+            prefs.getString(KEY_WRAPPED_PASSWORD_VAULT_KEY, null) != null
+    }
+
+    fun setPasswordVaultKey(context: Context, key: ByteArray) {
+        activePasswordVaultKey = key
+        val passwordVaultSalt = CredentialCipher.generateRandomSalt()
+        saveBiometricWrappedPasswordVaultKey(context, key, passwordVaultSalt)
+    }
+
+    fun clearPasswordVaultKey(context: Context) {
+        activePasswordVaultKey = null
+        getPrefs(context).edit()
+            .remove(KEY_PASSWORD_VAULT_SALT)
+            .remove(KEY_WRAPPED_PASSWORD_VAULT_KEY)
+            .remove(KEY_BIOMETRIC_WRAPPED_PASSWORD_VAULT_KEY)
+            .apply()
+    }
+
     /**
      * Sets or changes the local PIN. Derives keys, wraps the vault key, and stores salt/hash.
      */
@@ -85,30 +107,32 @@ object AppLockManager {
 
         val pinSalt = CredentialCipher.generateRandomSalt()
         val vaultSalt = CredentialCipher.generateRandomSalt()
-        val passwordVaultSalt = CredentialCipher.generateRandomSalt()
         val pinHash = CredentialCipher.hashPinForStorage(pin, pinSalt)
 
         val vaultKey = activeVaultKey ?: CredentialCipher.generateVaultKey()
-        val passwordVaultKey = activePasswordVaultKey ?: CredentialCipher.generateVaultKey()
         val derivedKey = CredentialCipher.deriveKey(pin, vaultSalt)
         val wrapped = CredentialCipher.wrap(vaultKey, derivedKey)
-        val passwordWrapped = CredentialCipher.wrap(passwordVaultKey, CredentialCipher.deriveKey(pin, passwordVaultSalt))
 
-        getPrefs(context).edit()
+        val editor = getPrefs(context).edit()
             .putString(KEY_PIN_HASH, pinHash)
             .putString(KEY_PIN_SALT, Base64.getEncoder().encodeToString(pinSalt))
             .putString(KEY_VAULT_SALT, Base64.getEncoder().encodeToString(vaultSalt))
             .putString(KEY_WRAPPED_VAULT_KEY, wrapped.serialize())
-            .putString(KEY_PASSWORD_VAULT_SALT, Base64.getEncoder().encodeToString(passwordVaultSalt))
-            .putString(KEY_WRAPPED_PASSWORD_VAULT_KEY, passwordWrapped.serialize())
             .putBoolean(KEY_PIN_ENABLED, true)
-            .apply()
 
+        val passwordVaultKey = activePasswordVaultKey
+        if (passwordVaultKey != null) {
+            val passwordVaultSalt = CredentialCipher.generateRandomSalt()
+            val passwordWrapped = CredentialCipher.wrap(passwordVaultKey, CredentialCipher.deriveKey(pin, passwordVaultSalt))
+            editor.putString(KEY_PASSWORD_VAULT_SALT, Base64.getEncoder().encodeToString(passwordVaultSalt))
+                .putString(KEY_WRAPPED_PASSWORD_VAULT_KEY, passwordWrapped.serialize())
+            saveBiometricWrappedPasswordVaultKey(context, passwordVaultKey, passwordVaultSalt)
+        }
+
+        editor.apply()
         saveBiometricWrappedVaultKey(context, vaultKey, vaultSalt)
-        saveBiometricWrappedPasswordVaultKey(context, passwordVaultKey, passwordVaultSalt)
 
         activeVaultKey = vaultKey
-        activePasswordVaultKey = passwordVaultKey
         isUnlocked = true
         clearFailureState(context)
     }
@@ -126,7 +150,7 @@ object AppLockManager {
             activeVaultKey = ensureVaultKeyInitialized(context) ?: return false
         }
         if (activePasswordVaultKey == null) {
-            activePasswordVaultKey = ensurePasswordVaultKeyInitialized(context) ?: return false
+            activePasswordVaultKey = ensurePasswordVaultKeyInitialized(context)
         }
         isUnlocked = true
         return true
@@ -166,7 +190,7 @@ object AppLockManager {
         val derivedKey = CredentialCipher.deriveKey(pin, vaultSalt)
         val wrapped = WrappedSecret.deserialize(wrappedB64) ?: return false
         val vaultKey = CredentialCipher.unwrap(wrapped, derivedKey)
-        val passwordVaultKey = unlockPasswordVaultWithPin(context, pin) ?: return false
+        val passwordVaultKey = unlockPasswordVaultWithPin(context, pin)
 
         activeVaultKey = vaultKey
         saveBiometricWrappedVaultKey(context, vaultKey, vaultSalt)
@@ -204,14 +228,6 @@ object AppLockManager {
         val prefs = getPrefs(context)
         val biometricWrappedB64 = prefs.getString(KEY_BIOMETRIC_WRAPPED_PASSWORD_VAULT_KEY, null)
         val vaultSaltB64 = prefs.getString(KEY_PASSWORD_VAULT_SALT, null)
-        val pinWrappedB64 = prefs.getString(KEY_WRAPPED_PASSWORD_VAULT_KEY, null)
-        if (biometricWrappedB64 == null && vaultSaltB64 == null && pinWrappedB64 == null) {
-            val freshKey = CredentialCipher.generateVaultKey()
-            val vaultSalt = CredentialCipher.generateRandomSalt()
-            saveBiometricWrappedPasswordVaultKey(context, freshKey, vaultSalt)
-            activePasswordVaultKey = freshKey
-            return freshKey
-        }
         if (biometricWrappedB64 == null || vaultSaltB64 == null) return null
         return runCatching {
             val vaultSalt = Base64.getDecoder().decode(vaultSaltB64)
@@ -224,17 +240,6 @@ object AppLockManager {
         val prefs = getPrefs(context)
         val vaultSaltB64 = prefs.getString(KEY_PASSWORD_VAULT_SALT, null)
         val wrappedB64 = prefs.getString(KEY_WRAPPED_PASSWORD_VAULT_KEY, null)
-        if (vaultSaltB64 == null && wrappedB64 == null) {
-            val freshKey = CredentialCipher.generateVaultKey()
-            val vaultSalt = CredentialCipher.generateRandomSalt()
-            val wrapped = CredentialCipher.wrap(freshKey, CredentialCipher.deriveKey(pin, vaultSalt))
-            prefs.edit()
-                .putString(KEY_PASSWORD_VAULT_SALT, Base64.getEncoder().encodeToString(vaultSalt))
-                .putString(KEY_WRAPPED_PASSWORD_VAULT_KEY, wrapped.serialize())
-                .apply()
-            saveBiometricWrappedPasswordVaultKey(context, freshKey, vaultSalt)
-            return freshKey
-        }
         if (vaultSaltB64 == null || wrappedB64 == null) return null
         return runCatching {
             val vaultSalt = Base64.getDecoder().decode(vaultSaltB64)

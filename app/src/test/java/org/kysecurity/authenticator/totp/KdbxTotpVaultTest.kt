@@ -25,6 +25,8 @@ class KdbxTotpVaultTest {
                 periodSeconds = 30,
                 algorithm = TotpEntry.Algorithm.SHA1,
                 issuer = "Google",
+                url = "https://accounts.google.com",
+                notes = "Personal account notes",
             ),
             TotpEntry(
                 title = "GitHub (user)",
@@ -33,6 +35,7 @@ class KdbxTotpVaultTest {
                 periodSeconds = 60,
                 algorithm = TotpEntry.Algorithm.SHA256,
                 issuer = "GitHub",
+                url = "https://github.com",
             ),
         )
 
@@ -49,6 +52,8 @@ class KdbxTotpVaultTest {
         assertEquals(6, google.digits)
         assertEquals(30L, google.periodSeconds)
         assertEquals("Google", google.issuer)
+        assertEquals("https://accounts.google.com", google.url)
+        assertEquals("Personal account notes", google.notes)
 
         val github = loaded.find { it.title == "GitHub (user)" }
         assertNotNull(github)
@@ -56,6 +61,8 @@ class KdbxTotpVaultTest {
         assertEquals(8, github.digits)
         assertEquals(60L, github.periodSeconds)
         assertEquals(TotpEntry.Algorithm.SHA256, github.algorithm)
+        assertEquals("https://github.com", github.url)
+        assertEquals(null, github.notes)
     }
 
     @Test
