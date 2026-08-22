@@ -2,6 +2,7 @@ package org.kysecurity.authenticator.passkeys
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.SigningInfo
 import android.os.Build
 import android.service.credentials.BeginGetCredentialOption
 import android.service.credentials.BeginGetCredentialRequest
@@ -38,7 +39,7 @@ object CredentialEntryBuilder {
                 TYPE_PUBLIC_KEY, TYPE_PUBLIC_KEY_ANDX ->
                     addPasskeyEntries(
                         context, option, entries, webOriginHost, callerPackage, callerOrigin,
-                        responseBuilder, requestCode++,
+                        origin, callingAppInfo?.signingInfo, responseBuilder, requestCode++,
                     )
                 TYPE_PASSWORD, TYPE_PASSWORD_ANDX ->
                     addPasswordEntries(
@@ -57,6 +58,8 @@ object CredentialEntryBuilder {
         webOriginHost: String?,
         callerPackage: String?,
         callerOrigin: String?,
+        callerWebOrigin: String?,
+        callerSigningInfo: SigningInfo?,
         responseBuilder: BeginGetCredentialResponse.Builder,
         requestCode: Int,
     ) {
@@ -66,7 +69,17 @@ object CredentialEntryBuilder {
 
         // Fail closed: an RP ID we cannot validate against the caller gets no entries at all.
         val rpId = RpId.validate(json.optString("rpId"), webOriginHost) ?: return
-        val clientDataHash = option.candidateQueryData.getByteArray(BUNDLE_KEY_CLIENT_DATA_HASH)
+        // A native caller named this RP itself; only the RP can confirm the claim.
+        if (webOriginHost == null &&
+            !DigitalAssetLinks.isCallerAuthorized(rpId, callerPackage, callerSigningInfo)
+        ) {
+            return
+        }
+        // Only a privileged browser may dictate the signed client data; see ClientData.
+        val clientDataHash = ClientData.privilegedClientDataHash(
+            callerWebOrigin,
+            option.candidateQueryData.getByteArray(BUNDLE_KEY_CLIENT_DATA_HASH),
+        )
 
         for (entry in entries.filter { DomainMatcher.matchesPasskey(it, rpId) }) {
             val passkey = entry.passkey ?: continue

@@ -13,6 +13,15 @@ import javax.crypto.spec.SecretKeySpec
  */
 object KyPasswordEnvelopeCrypto {
     private const val DEFAULT_ITERATIONS = 600_000
+
+    /**
+     * A paired server supplies the iteration count, so it also decides how much work unwrapping
+     * costs. Without a ceiling a hostile server pins a core for minutes on every unlock. There is
+     * deliberately no floor: a low count only produces a wrong key (the GCM tag then fails), and
+     * rejecting it would lock users out of envelopes a server legitimately wrote with fewer
+     * rounds.
+     */
+    private const val MAX_ITERATIONS = 5_000_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
 
@@ -22,6 +31,7 @@ object KyPasswordEnvelopeCrypto {
         val ivHex = json.getString("iv")
         val ciphertextHex = json.getString("ciphertext")
         val iterations = if (json.has("iterations")) json.getInt("iterations") else DEFAULT_ITERATIONS
+        require(iterations in 1..MAX_ITERATIONS) { "Envelope iteration count is out of range" }
 
         val salt = hexToBytes(saltHex)
         val iv = hexToBytes(ivHex)

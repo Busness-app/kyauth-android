@@ -13,12 +13,14 @@ import android.widget.RemoteViews
 class ParsedFields {
     var webDomain: String? = null
     var packageName: String? = null
+    /** True only when the request came from a known browser; see [TrustedBrowsers]. */
+    var trustWebDomain: Boolean = false
     var usernameId: AutofillId? = null
     var passwordId: AutofillId? = null
     var usernameValue: String? = null
     var passwordValue: String? = null
 
-    val targetDomain: String? get() = webDomain ?: packageName
+    val targetDomain: String? get() = AutofillParser.resolveTargetDomain(webDomain, packageName, trustWebDomain)
     val autofillIds: Array<AutofillId> get() = listOfNotNull(usernameId, passwordId).toTypedArray()
 }
 
@@ -26,11 +28,25 @@ object AutofillParser {
 
     fun parse(structure: AssistStructure): ParsedFields {
         val fields = ParsedFields()
+        // The activity component is filled in by the system, unlike anything in the view tree.
+        val callerPackage = runCatching { structure.activityComponent?.packageName }.getOrNull()
+        fields.packageName = callerPackage
+        fields.trustWebDomain = TrustedBrowsers.isTrusted(callerPackage)
         for (i in 0 until structure.windowNodeCount) {
             traverse(structure.getWindowNodeAt(i).rootViewNode, fields)
         }
         return fields
     }
+
+    /**
+     * What this request is asking for a credential *for*.
+     *
+     * A browser is answering for the page it has loaded, so its web domain is the target. Every
+     * other app is only ever its own package: an app that names a domain is making a claim it was
+     * never asked to prove, and honouring it would hand one site's password to another app.
+     */
+    fun resolveTargetDomain(webDomain: String?, packageName: String?, trustWebDomain: Boolean): String? =
+        if (trustWebDomain) webDomain ?: packageName else packageName
 
     /** Builds the filled datasets. Only ever reached with vault entries the user has unlocked. */
     fun buildDatasets(
@@ -72,7 +88,8 @@ object AutofillParser {
 
     private fun traverse(node: AssistStructure.ViewNode, fields: ParsedFields) {
         node.webDomain?.let { fields.webDomain = it }
-        node.idPackage?.let { if (fields.packageName == null) fields.packageName = it }
+        // The package deliberately is not taken from the tree: only the activity component read in
+        // parse() comes from the system. Without it there is no caller identity, and no fill.
 
         val hints = node.autofillHints?.toList().orEmpty()
         val isPasswordType = node.inputType and

@@ -290,7 +290,8 @@ class CredentialAuthActivity : AppCompatActivity() {
 
         // A privileged caller supplies the hash it already committed to; otherwise KyAuth builds
         // the CollectedClientData itself and returns the exact bytes it hashed.
-        val clientDataJson = if (intent.hasClientDataHash()) {
+        val callerHash = intent.privilegedClientDataHash()
+        val clientDataJson = if (callerHash != null) {
             null
         } else {
             val origin = intent.getStringExtra(EXTRA_ORIGIN)?.takeIf { it.isNotBlank() }
@@ -302,8 +303,7 @@ class CredentialAuthActivity : AppCompatActivity() {
                 intent.getStringExtra(EXTRA_CALLER_PACKAGE),
             )
         }
-        val clientDataHash = intent.getByteArrayExtra(EXTRA_CLIENT_DATA_HASH)
-            ?: WebAuthnEngine.sha256(requireNotNull(clientDataJson))
+        val clientDataHash = callerHash ?: WebAuthnEngine.sha256(requireNotNull(clientDataJson))
 
         val privateKey = runCatching { WebAuthnEngine.restorePrivateKey(passkey.privateKeyPkcs8) }.getOrNull()
             ?: return failed("Corrupted private key")
@@ -375,7 +375,7 @@ class CredentialAuthActivity : AppCompatActivity() {
         val challenge = json.optString("challenge").takeIf { it.isNotBlank() }
             ?: return failed("Request has no challenge")
 
-        val clientDataJson = if (intent.hasClientDataHash()) {
+        val clientDataJson = if (intent.privilegedClientDataHash() != null) {
             null
         } else {
             val origin = intent.getStringExtra(EXTRA_ORIGIN)?.takeIf { it.isNotBlank() }
@@ -500,7 +500,16 @@ class CredentialAuthActivity : AppCompatActivity() {
         return false
     }
 
-    private fun Intent.hasClientDataHash(): Boolean = getByteArrayExtra(EXTRA_CLIENT_DATA_HASH) != null
+    /**
+     * The hash is honoured only alongside a privileged web origin. The service already refuses to
+     * forward an unprivileged caller's hash; re-checking here keeps the rule with the code that
+     * signs, so a future caller of this activity cannot reintroduce the bypass.
+     */
+    private fun Intent.privilegedClientDataHash(): ByteArray? =
+        ClientData.privilegedClientDataHash(
+            getStringExtra(EXTRA_ORIGIN),
+            getByteArrayExtra(EXTRA_CLIENT_DATA_HASH),
+        )
 
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, B64_FLAGS)
 

@@ -28,9 +28,13 @@ import org.kysecurity.authenticator.security.writeAtomically
 object KdbxPasswordVault {
     private const val VAULT_GROUP_NAME = "KyAuth Passwords"
 
+    /** The vault is read into memory whole, so a synced file is bounded before it is decoded. */
+    private const val MAX_VAULT_BYTES = 25L * 1024 * 1024
+
     @Synchronized
     fun loadEntries(vaultFile: File, vaultKey: ByteArray): List<PasswordEntry> {
         if (!vaultFile.exists() || vaultFile.length() == 0L) return emptyList()
+        require(vaultFile.length() <= MAX_VAULT_BYTES) { "Password vault file is too large to decode" }
 
         val credentials = Credentials.from(EncryptedValue.fromString(bytesToHex(vaultKey)))
         val database = KeePassDatabase.decode(ByteArrayInputStream(vaultFile.readBytes()), credentials)

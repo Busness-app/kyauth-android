@@ -44,23 +44,27 @@ class CredentialUnlockActivity : AppCompatActivity() {
     }
 
     private fun respond(request: BeginGetCredentialRequest, cipher: Cipher) {
-        val response = AppLockManager.useVaultKeys(applicationContext, cipher) { keys ->
-            val vaultKey = keys.passwords ?: return@useVaultKeys null
-            val entries = runCatching {
-                KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
-            }.getOrNull() ?: return@useVaultKeys null
-            CredentialEntryBuilder.build(this, request, entries)
-        }
-
-        if (response == null) {
-            finishCancelled()
-            return
-        }
-        setResult(
-            Activity.RESULT_OK,
-            Intent().putExtra(CredentialProviderService.EXTRA_BEGIN_GET_CREDENTIAL_RESPONSE, response),
-        )
-        finish()
+        // Building entries verifies native callers against the relying party over the network.
+        Thread {
+            val response = AppLockManager.useVaultKeys(applicationContext, cipher) { keys ->
+                val vaultKey = keys.passwords ?: return@useVaultKeys null
+                val entries = runCatching {
+                    KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
+                }.getOrNull() ?: return@useVaultKeys null
+                CredentialEntryBuilder.build(this, request, entries)
+            }
+            runOnUiThread {
+                if (response == null) {
+                    finishCancelled()
+                    return@runOnUiThread
+                }
+                setResult(
+                    Activity.RESULT_OK,
+                    Intent().putExtra(CredentialProviderService.EXTRA_BEGIN_GET_CREDENTIAL_RESPONSE, response),
+                )
+                finish()
+            }
+        }.start()
     }
 
     private fun finishCancelled() {

@@ -9,10 +9,8 @@ import org.kysecurity.authenticator.passwords.PublicSuffix
  * domain, must not be a registry boundary, and — when the caller is a browser passing a web
  * origin — must be that origin's domain or a registrable parent of it.
  *
- * A native app is NOT verified against the RP it claims. Doing that requires fetching
- * `https://<rpId>/.well-known/assetlinks.json` and matching the caller's signing certificate;
- * until that exists, any installed app can request a credential for any RP ID. Tracked in
- * AGENTS.md.
+ * A native app's claim cannot be settled offline at all, so it is not settled here:
+ * [DigitalAssetLinks] verifies the caller against the RP before any entry is surfaced or minted.
  */
 object RpId {
     private val LABEL = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?")

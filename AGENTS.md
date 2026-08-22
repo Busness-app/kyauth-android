@@ -32,8 +32,17 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   authentication `Action` (`CredentialUnlockActivity`). Both unwrap the keys for one operation via
   `AppLockManager.useVaultKeys` and erase them again, so a background request never unlocks the app.
 - Passkey RP IDs are validated by `RpId`: syntactically valid, not a public suffix, and for browser
-  callers equal to or a registrable parent of the caller's web origin. Native-app callers are NOT
-  verified against the RP they claim; that needs Digital Asset Links (see Outstanding).
+  callers equal to or a registrable parent of the caller's web origin. Native-app callers are bound
+  to the RP by `DigitalAssetLinks`, which fetches `https://<rpId>/.well-known/assetlinks.json` and
+  matches the caller's signing certificate. It fails closed: no statement, or an offline device with
+  a cold cache, means no passkeys are offered to a native caller.
+- A caller-supplied `clientDataHash` is honoured only from a caller that set a privileged web origin
+  (`ClientData.privilegedClientDataHash`). Only a holder of `CREDENTIAL_MANAGER_SET_ORIGIN` can set
+  that origin, so an ordinary app cannot choose the bytes KyAuth signs. For every other caller the
+  `CollectedClientData` is built here, with the `android:apk-key-hash:` origin.
+- Autofill believes a request's `webDomain` only from a package in `TrustedBrowsers`; any other
+  caller is matched on its own package. `setWebDomain` is public API, so an unfiltered domain from an
+  arbitrary app would hand one site's credential to another.
 - Password fill matches an entry's domain or its subdomains, never a parent or sibling, and never
   across a public suffix. Passkey matching is exact on RP ID.
 - Every incremental vault mutation goes through `KdbxPasswordVault.update`, one serialized
@@ -84,10 +93,12 @@ Run the unit tests and build the debug APK:
 
 Recorded so it is not mistaken for done:
 
-- **Digital Asset Links.** A native app caller is not verified against the RP ID it requests. The
-  fix is fetching `https://<rpId>/.well-known/assetlinks.json` and matching the caller's signing
-  certificate, with a cache. Until then any installed app can request a credential for any RP.
 - **Public Suffix List.** `PublicSuffix` is a short bundled list, not the real PSL.
+- **Trusted browser signing certificates.** `TrustedBrowsers` matches on package name only. Package
+  names are unique on a device, but a sideloaded app can claim one that is not installed; pinning
+  each browser's signing certificate would close that.
+- **Vault size ceilings.** `KyPasswordClient` and `KdbxPasswordVault` cap a synced vault at 25 MB and
+  a JSON body at 1 MB. Large legitimate vaults would need these raised.
 - **Push MFA payload binding.** `MfaMessage.formatPayload` still signs only
   `prefix|challengeId|verb|digits`. Binding server origin, account, purpose and expiry needs a
   matching KySignOn server change.

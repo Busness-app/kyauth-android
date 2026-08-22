@@ -40,4 +40,22 @@ class TotpUriParserTest {
             TotpUriParser.parse("otpauth://hotp/account?secret=ABC")
         }
     }
+
+    @Test
+    fun rejectsSecretThatDecodesToNothing() {
+        // A single Base32 character carries five bits and decodes to an empty HMAC key. Accepting
+        // it used to persist an entry that crashed the TOTP list on every launch.
+        assertThrows(IllegalArgumentException::class.java) {
+            TotpUriParser.parse("otpauth://totp/Acme?secret=A")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TotpUriParser.parse("otpauth://totp/Acme?secret=%3D")
+        }
+    }
+
+    @Test
+    fun acceptsShortButUsableSecret() {
+        val entry = TotpUriParser.parse("otpauth://totp/Acme?secret=AA")
+        assertEquals("AA", entry.secretBase32)
+    }
 }

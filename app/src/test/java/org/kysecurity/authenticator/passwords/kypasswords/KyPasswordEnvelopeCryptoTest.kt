@@ -3,6 +3,7 @@ package org.kysecurity.authenticator.passwords.kypasswords
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class KyPasswordEnvelopeCryptoTest {
@@ -46,5 +47,20 @@ class KyPasswordEnvelopeCryptoTest {
         val hex = KyPasswordEnvelopeCrypto.bytesToHex(bytes)
         val result = KyPasswordEnvelopeCrypto.hexToBytes(hex)
         assertArrayEquals(bytes, result)
+    }
+
+    @Test
+    fun rejectsAbsurdIterationCount() {
+        // A hostile server dictating the KDF cost would pin a core for minutes on every unlock.
+        val envelope = org.json.JSONObject()
+            .put("salt", "00112233445566778899aabbccddeeff")
+            .put("iv", "000102030405060708090a0b")
+            .put("ciphertext", "00112233445566778899aabbccddeeff")
+            .put("iterations", Int.MAX_VALUE)
+            .toString()
+
+        assertThrows(IllegalArgumentException::class.java) {
+            KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, "secret")
+        }
     }
 }

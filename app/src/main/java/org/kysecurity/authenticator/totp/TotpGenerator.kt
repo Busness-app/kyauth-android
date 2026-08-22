@@ -23,6 +23,15 @@ object TotpGenerator {
     fun secondsRemaining(entry: TotpEntry, epochSeconds: Long): Long =
         entry.periodSeconds - (epochSeconds % entry.periodSeconds)
 
+    /**
+     * True when the secret decodes to at least one byte of key material.
+     *
+     * A non-blank secret is not the same as a usable one: a single Base32 character carries five
+     * bits and decodes to nothing, and an empty HMAC key throws when the code is generated.
+     */
+    fun isUsableSecret(secretBase32: String): Boolean =
+        runCatching { base32Decode(secretBase32).isNotEmpty() }.getOrDefault(false)
+
     private fun base32Decode(input: String): ByteArray {
         val normalized = input.uppercase(Locale.ROOT).filterNot { it == '=' || it.isWhitespace() }
         require(normalized.isNotEmpty()) { "TOTP secret is empty" }

@@ -41,19 +41,17 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<BeginGetCredentialResponse, GetCredentialException>,
     ) {
-        val vaultKey = AppLockManager.getPasswordVaultKey()
-        if (vaultKey == null) {
-            callback.onResult(lockedResponse())
-            return
-        }
+        // Verifying a native caller against the relying party fetches over the network, so this
+        // must not run on the binder thread.
+        Thread { callback.onResult(buildGetResponse(request)) }.start()
+    }
+
+    private fun buildGetResponse(request: BeginGetCredentialRequest): BeginGetCredentialResponse {
+        val vaultKey = AppLockManager.getPasswordVaultKey() ?: return lockedResponse()
         val entries = runCatching {
             KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
-        }.getOrNull()
-        if (entries == null) {
-            callback.onResult(lockedResponse())
-            return
-        }
-        callback.onResult(CredentialEntryBuilder.build(this, request, entries))
+        }.getOrNull() ?: return lockedResponse()
+        return CredentialEntryBuilder.build(this, request, entries)
     }
 
     override fun onBeginCreateCredential(
@@ -61,6 +59,10 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<BeginCreateCredentialResponse, CreateCredentialException>,
     ) {
+        Thread { callback.onResult(buildCreateResponse(request)) }.start()
+    }
+
+    private fun buildCreateResponse(request: BeginCreateCredentialRequest): BeginCreateCredentialResponse {
         val callingAppInfo = request.callingAppInfo
         val origin = callingAppInfo?.origin
         val webOriginHost = ClientData.webOriginHost(origin)
@@ -73,13 +75,16 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                 val requestJson = request.data.getString(CredentialEntryBuilder.BUNDLE_KEY_REQUEST_JSON)
                     ?: request.data.getString(CredentialEntryBuilder.BUNDLE_KEY_REQUEST_JSON_LEGACY).orEmpty()
                 val json = runCatching { JSONObject(requestJson) }.getOrNull() ?: run {
-                    callback.onResult(responseBuilder.build())
-                    return
+                    return responseBuilder.build()
                 }
                 val rpId = RpId.validate(json.optJSONObject("rp")?.optString("id"), webOriginHost) ?: run {
                     // Refuse to mint a credential for an RP ID the caller has no claim to.
-                    callback.onResult(responseBuilder.build())
-                    return
+                    return responseBuilder.build()
+                }
+                if (webOriginHost == null &&
+                    !DigitalAssetLinks.isCallerAuthorized(rpId, callerPackage, callingAppInfo?.signingInfo)
+                ) {
+                    return responseBuilder.build()
                 }
                 val userObj = json.optJSONObject("user")
                 val username = userObj?.optString("name")?.ifBlank { null }
@@ -96,7 +101,11 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                     putExtra(CredentialAuthActivity.EXTRA_CALLER_PACKAGE, callerPackage)
                     putExtra(
                         CredentialAuthActivity.EXTRA_CLIENT_DATA_HASH,
-                        request.data.getByteArray(CredentialEntryBuilder.BUNDLE_KEY_CLIENT_DATA_HASH),
+                        // Only a privileged browser may dictate the signed client data.
+                        ClientData.privilegedClientDataHash(
+                            origin,
+                            request.data.getByteArray(CredentialEntryBuilder.BUNDLE_KEY_CLIENT_DATA_HASH),
+                        ),
                     )
                     putExtra(CredentialAuthActivity.EXTRA_USERNAME, username)
                     putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, title)
@@ -122,8 +131,7 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                 val password = request.data.getString("androidx.credentials.BUNDLE_KEY_PASSWORD")
                     ?: request.data.getString("android.credentials.CreatePasswordRequest.BUNDLE_KEY_PASSWORD").orEmpty()
                 val domain = webOriginHost ?: DomainMatcher.extractDomain(callerPackage) ?: run {
-                    callback.onResult(responseBuilder.build())
-                    return
+                    return responseBuilder.build()
                 }
                 val title = if (username.isNotBlank()) "Save Password for $username" else "Save Password to KyAuth"
                 val subtitle = "Save credentials for $domain"
@@ -152,7 +160,7 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
             }
         }
 
-        callback.onResult(responseBuilder.build())
+        return responseBuilder.build()
     }
 
     override fun onClearCredentialState(

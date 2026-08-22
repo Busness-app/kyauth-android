@@ -50,6 +50,18 @@ object ClientData {
         return "android:apk-key-hash:" + Base64.encodeToString(digest, B64)
     }
 
+    /**
+     * The caller-supplied `clientDataHash`, but only when the caller is privileged.
+     *
+     * Only a caller holding CREDENTIAL_MANAGER_SET_ORIGIN can set a web origin, so a non-null
+     * origin is the one trustworthy signal that a browser is speaking for a web page. The hash
+     * itself is an ordinary request field any app can set: honouring it on its own would let an
+     * unprivileged app choose the bytes KyAuth signs, and so mint an assertion for an origin it
+     * has no claim to.
+     */
+    fun privilegedClientDataHash(origin: String?, clientDataHash: ByteArray?): ByteArray? =
+        if (webOriginHost(origin) == null) null else clientDataHash
+
     /** The host of a web origin such as `https://example.com`, or null if it is not one. */
     fun webOriginHost(origin: String?): String? {
         if (origin.isNullOrBlank() || !origin.startsWith("https://", ignoreCase = true)) return null

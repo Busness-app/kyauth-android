@@ -21,6 +21,7 @@ data class TotpEntry(
         require(digits in 6..8)
         require(periodSeconds > 0)
         require(secretBase32.isNotBlank())
+        require(TotpGenerator.isUsableSecret(secretBase32)) { "TOTP secret is not usable Base32" }
     }
 
     enum class Algorithm { SHA1, SHA256, SHA512 }
@@ -42,22 +43,26 @@ data class TotpEntry(
             notes: String? = null,
         ): TotpEntry? {
             val secret = fields["TimeOtp-Secret-Base32"] ?: return null
-            return TotpEntry(
-                title = title,
-                secretBase32 = secret,
-                digits = fields["TimeOtp-Length"]?.toIntOrNull() ?: 6,
-                periodSeconds = fields["TimeOtp-Period"]?.toLongOrNull() ?: 30,
-                algorithm = when (fields["TimeOtp-Algorithm"]?.uppercase()) {
-                    null, "HMAC-SHA-1", "HMAC-SHA1", "SHA1" -> Algorithm.SHA1
-                    "HMAC-SHA-256", "HMAC-SHA256", "SHA256" -> Algorithm.SHA256
-                    "HMAC-SHA-512", "HMAC-SHA512", "SHA512" -> Algorithm.SHA512
-                    else -> Algorithm.SHA1
-                },
-                issuer = fields["TimeOtp-Issuer"],
-                url = url ?: fields["URL"] ?: fields["Url"],
-                notes = notes ?: fields["Notes"],
-                id = id,
-            )
+            // An entry stored before this was validated must be skipped, not thrown out of the
+            // whole vault load.
+            return runCatching {
+                TotpEntry(
+                    title = title,
+                    secretBase32 = secret,
+                    digits = fields["TimeOtp-Length"]?.toIntOrNull() ?: 6,
+                    periodSeconds = fields["TimeOtp-Period"]?.toLongOrNull() ?: 30,
+                    algorithm = when (fields["TimeOtp-Algorithm"]?.uppercase()) {
+                        null, "HMAC-SHA-1", "HMAC-SHA1", "SHA1" -> Algorithm.SHA1
+                        "HMAC-SHA-256", "HMAC-SHA256", "SHA256" -> Algorithm.SHA256
+                        "HMAC-SHA-512", "HMAC-SHA512", "SHA512" -> Algorithm.SHA512
+                        else -> Algorithm.SHA1
+                    },
+                    issuer = fields["TimeOtp-Issuer"],
+                    url = url ?: fields["URL"] ?: fields["Url"],
+                    notes = notes ?: fields["Notes"],
+                    id = id,
+                )
+            }.getOrNull()
         }
     }
 }

@@ -2,8 +2,11 @@ package org.kysecurity.authenticator.passwords.kypasswords
 
 import org.json.JSONObject
 import org.kysecurity.authenticator.pairing.PairingEndpoint
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -30,6 +33,34 @@ data class KyPasswordMetadata(
     val passwordEnvelope: String? = null,
     val recoveryEnvelope: String? = null,
 )
+
+/**
+ * A paired server is not trusted to be well behaved: every response it sends is read through a
+ * ceiling so a hostile or broken server cannot exhaust the device's heap or storage.
+ */
+private const val MAX_JSON_BYTES = 1L * 1024 * 1024
+private const val MAX_VAULT_BYTES = 25L * 1024 * 1024
+
+/** Reads at most [max] bytes, failing rather than truncating so a clipped vault is never stored. */
+private fun InputStream.copyCapped(out: OutputStream, max: Long): Long {
+    val buffer = ByteArray(8192)
+    var total = 0L
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) break
+        total += read
+        if (total > max) throw KyPasswordException("Server response exceeds $max bytes")
+        out.write(buffer, 0, read)
+    }
+    return total
+}
+
+private fun InputStream?.readCapped(max: Long): String {
+    if (this == null) return ""
+    val out = ByteArrayOutputStream()
+    copyCapped(out, max)
+    return out.toString(Charsets.UTF_8.name())
+}
 
 class KyPasswordClient {
     fun redeemPairing(
@@ -64,7 +95,7 @@ class KyPasswordClient {
         try {
             connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(payload) }
             val body = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
-                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                .readCapped(MAX_JSON_BYTES)
             val response = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
 
             if (connection.responseCode == 401) {
@@ -105,7 +136,7 @@ class KyPasswordClient {
 
         try {
             val body = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
-                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                .readCapped(MAX_JSON_BYTES)
 
             if (connection.responseCode == 401) {
                 throw KyPasswordAuthException("Unauthorized (401): KyPasswords session token is expired or device was revoked")
@@ -150,7 +181,7 @@ class KyPasswordClient {
                 throw KyPasswordNotFoundException("Vault file does not exist on server (404)")
             }
             if (connection.responseCode !in 200..299) {
-                val error = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val error = connection.errorStream.readCapped(MAX_JSON_BYTES)
                 throw KyPasswordException("Failed to download vault (${connection.responseCode}): $error")
             }
 
@@ -160,10 +191,15 @@ class KyPasswordClient {
 
             val tempFile = File(targetFile.parentFile, ".${targetFile.name}.download")
             tempFile.parentFile?.mkdirs()
-            connection.inputStream.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
+            try {
+                connection.inputStream.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        input.copyCapped(output, MAX_VAULT_BYTES)
+                    }
                 }
+            } catch (e: Exception) {
+                tempFile.delete()
+                throw e
             }
 
             if (!tempFile.renameTo(targetFile)) {
@@ -216,7 +252,7 @@ class KyPasswordClient {
             }
 
             val body = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
-                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                .readCapped(MAX_JSON_BYTES)
 
             if (connection.responseCode == 401) {
                 throw KyPasswordAuthException("Unauthorized (401): KyPasswords session expired or device revoked")

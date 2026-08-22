@@ -22,4 +22,5 @@
     <string name="about_version_badge">v%1$s</string>
     <string name="about_body">Developed by Busnes.app\n©%1$s - Licensed Under the GPL 3.0</string>
     <string name="about_license_label">GNU General Public License v3.0</string>
+    <string name="totp_code_unavailable">Unavailable</string>
 </resources>

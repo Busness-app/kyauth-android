@@ -450,9 +450,15 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = fullWidthParams(bottom = 12)
             }
 
-            val code = TotpGenerator.generate(entry, nowSec)
+            // One unusable entry must not take down the whole tab: without this the user can
+            // never reach the delete button for it.
+            val code = runCatching { TotpGenerator.generate(entry, nowSec) }.getOrNull()
             val remainingSec = TotpGenerator.secondsRemaining(entry, nowSec)
-            val formattedCode = if (code.length == 6) "${code.substring(0, 3)} ${code.substring(3)}" else code
+            val formattedCode = when {
+                code == null -> getString(R.string.totp_code_unavailable)
+                code.length == 6 -> "${code.substring(0, 3)} ${code.substring(3)}"
+                else -> code
+            }
 
             val titleView = TextView(this).apply {
                 text = entry.title
@@ -479,6 +485,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(ThemeManager.color(context, R.color.ky_cyan))
                 setPadding(0, 8, 0, 8)
                 setOnClickListener {
+                    if (code == null) return@setOnClickListener
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     copyTotpCode(clipboard, code, remainingSec)
                     Toast.makeText(this@MainActivity, getString(R.string.copy_code), Toast.LENGTH_SHORT).show()
