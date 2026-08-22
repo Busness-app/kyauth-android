@@ -58,7 +58,6 @@ import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.pairing.QrPairing
 import org.kysecurity.authenticator.pairing.QrPairingParser
 import org.kysecurity.authenticator.pairing.PushTokenProvider
-import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.PasswordEntry
 import org.kysecurity.authenticator.passwords.PasswordGenerator
@@ -70,6 +69,7 @@ import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordPairingParse
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordServerAccount
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordStore
 import org.kysecurity.authenticator.security.AppLockManager
+import org.kysecurity.authenticator.security.VaultUnlockPrompt
 import org.kysecurity.authenticator.security.PinFailurePolicy
 import org.kysecurity.authenticator.security.PinPolicy
 import org.kysecurity.authenticator.security.SecurityWipe
@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         loadPendingPushChallenge()
         if (!AppLockManager.isUnlocked()) {
-            authenticateWithBiometrics(silent = true)
+            unlockWithPrompt(silent = true)
         }
         renderContent()
         requestNotificationPermissionIfNeeded()
@@ -225,13 +225,7 @@ class MainActivity : AppCompatActivity() {
                                 triggerBtn?.isEnabled = true
                                 result.onSuccess { account ->
                                     store.save(account)
-                                    unlockVault(
-                                        unlock = { AppLockManager.unlockWithBiometrics(this@MainActivity) },
-                                        onError = {
-                                            renderContent()
-                                            Toast.makeText(this@MainActivity, "Unlock failed. Use your PIN to recover the vault.", Toast.LENGTH_LONG).show()
-                                        },
-                                    )
+                                    unlockWithPrompt()
                                 }.onFailure { error.text = it.message ?: "Pairing failed" }
                             }
                         }.start()
@@ -330,19 +324,7 @@ class MainActivity : AppCompatActivity() {
         val btnBiometric = primaryButton(getString(R.string.unlock_biometrics)).apply {
             minHeight = dp(56)
             setOnClickListener {
-                authenticateWithBiometrics(
-                    reason = "Unlock KyAuth",
-                    onSuccess = {
-                        unlockVault(
-                            unlock = { AppLockManager.unlockWithBiometrics(this@MainActivity) },
-                            onError = {
-                                renderContent()
-                                Toast.makeText(this@MainActivity, "Unlock failed. Use your PIN to recover the vault.", Toast.LENGTH_LONG).show()
-                            },
-                        )
-                    },
-                    onError = { error.text = it },
-                )
+                unlockWithPrompt(onError = { error.text = it })
             }
         }
         root.addView(btnBiometric, lockActionParams())
@@ -1448,9 +1430,12 @@ class MainActivity : AppCompatActivity() {
                         }
                     } catch (conflict: org.kysecurity.authenticator.passwords.kypasswords.KyPasswordConflictException) {
                         val version = kyPasswordClient.downloadVault(account.serverUrl, account.sessionToken, passwordVaultFile)
-                        val remoteEntries = KdbxPasswordVault.loadEntries(passwordVaultFile, vaultKey)
-                        val merged = (remoteEntries + passwordEntries).distinctBy { it.id }
-                        KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, merged)
+                        val merged = KdbxPasswordVault.update(passwordVaultFile, vaultKey) { remote ->
+                            val combined = (remote.toList() + passwordEntries).distinctBy { it.id }
+                            remote.clear()
+                            remote.addAll(combined)
+                            true
+                        }
                         passwordEntries = merged.toMutableList()
                         val reUploadVersion = kyPasswordClient.uploadVault(
                             serverUrl = account.serverUrl,
@@ -1925,6 +1910,13 @@ class MainActivity : AppCompatActivity() {
             }.isSuccess
             runOnUiThread {
                 isVaultLoading = false
+                // onStop may have locked while this thread was loading; do not resurrect the vault.
+                if (!AppLockManager.isUnlocked()) {
+                    totpEntries.clear()
+                    passwordEntries.clear()
+                    renderContent()
+                    return@runOnUiThread
+                }
                 if (success) renderContent() else onError()
             }
         }.start()
@@ -1945,18 +1937,36 @@ class MainActivity : AppCompatActivity() {
         setRootContentView(root)
     }
 
+    /**
+     * Unlocks the vault. The cipher comes from the prompt itself, so nothing is decrypted unless
+     * the framework reports a successful authentication.
+     */
+    private fun unlockWithPrompt(
+        reason: String = "Unlock KyAuth",
+        silent: Boolean = false,
+        onError: (String) -> Unit = {},
+    ) {
+        if (silent && !VaultUnlockPrompt.canAuthenticate(this)) return
+        VaultUnlockPrompt.show(
+            activity = this,
+            subtitle = reason,
+            onAuthenticated = { cipher ->
+                unlockVault(
+                    unlock = { AppLockManager.unlockWithBiometrics(this, cipher) },
+                    onError = {
+                        renderContent()
+                        Toast.makeText(this, "Unlock failed. Use your PIN to recover the vault.", Toast.LENGTH_LONG).show()
+                    },
+                )
+            },
+            onFailed = { if (!silent) onError("Unlock required: $it") },
+        )
+    }
+
     private fun authenticateWithBiometrics(
         reason: String = "Unlock KyAuth",
         silent: Boolean = false,
-        onSuccess: () -> Unit = {
-            unlockVault(
-                unlock = { AppLockManager.unlockWithBiometrics(this) },
-                onError = {
-                    renderContent()
-                    Toast.makeText(this, "Unlock failed. Use your PIN to recover the vault.", Toast.LENGTH_LONG).show()
-                },
-            )
-        },
+        onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {},
     ) {
         val biometricManager = BiometricManager.from(this)

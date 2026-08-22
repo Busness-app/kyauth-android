@@ -15,16 +15,20 @@ import app.keemobile.kotpass.models.Meta
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.UUID
+import org.kysecurity.authenticator.security.writeAtomically
 
+/**
+ * All access is serialized on this object: the UI, Autofill, the Credential Provider and vault
+ * sync all read-modify-write the same file, and an unsynchronized pair of those loses an update.
+ *
+ * [loadEntries] throws on a vault it cannot decode. Callers must not turn that into an empty list
+ * and save over it — an unreadable vault is not an empty vault.
+ */
 object KdbxPasswordVault {
     private const val VAULT_GROUP_NAME = "KyAuth Passwords"
 
+    @Synchronized
     fun loadEntries(vaultFile: File, vaultKey: ByteArray): List<PasswordEntry> {
         if (!vaultFile.exists() || vaultFile.length() == 0L) return emptyList()
 
@@ -57,6 +61,26 @@ object KdbxPasswordVault {
         return entries
     }
 
+    /**
+     * Atomic read-modify-write, returning the resulting entries.
+     *
+     * Serializing [loadEntries] and [saveEntries] individually is not enough: two writers that
+     * each load, mutate and save will still lose one another's changes. Every incremental
+     * mutation must go through here. [mutate] returns true when it changed anything; returning
+     * false skips the write so a read-only or failed operation does not rewrite the vault.
+     */
+    @Synchronized
+    fun update(
+        vaultFile: File,
+        vaultKey: ByteArray,
+        mutate: (MutableList<PasswordEntry>) -> Boolean,
+    ): List<PasswordEntry> {
+        val entries = loadEntries(vaultFile, vaultKey).toMutableList()
+        if (mutate(entries)) saveEntries(vaultFile, vaultKey, entries)
+        return entries
+    }
+
+    @Synchronized
     fun saveEntries(vaultFile: File, vaultKey: ByteArray, entries: List<PasswordEntry>) {
         val credentials = Credentials.from(EncryptedValue.fromString(bytesToHex(vaultKey)))
         val kdbxEntries = entries.map { password ->
@@ -83,17 +107,7 @@ object KdbxPasswordVault {
 
         val output = ByteArrayOutputStream()
         database.encode(output)
-        vaultFile.parentFile?.mkdirs()
-        val temporaryFile = File(vaultFile.parentFile, ".${vaultFile.name}.tmp")
-        FileOutputStream(temporaryFile).use {
-            it.write(output.toByteArray())
-            it.fd.sync()
-        }
-        try {
-            Files.move(temporaryFile.toPath(), vaultFile.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(temporaryFile.toPath(), vaultFile.toPath(), REPLACE_EXISTING)
-        }
+        writeAtomically(vaultFile, output.toByteArray())
     }
 
     private fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

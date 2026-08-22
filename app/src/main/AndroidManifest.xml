@@ -20,6 +20,14 @@
             android:name=".passkeys.CredentialAuthActivity"
             android:exported="false"
             android:theme="@style/Theme.KyAuth" />
+        <activity
+            android:name=".passkeys.CredentialUnlockActivity"
+            android:exported="false"
+            android:theme="@style/Theme.KyAuth" />
+        <activity
+            android:name=".passwords.AutofillUnlockActivity"
+            android:exported="false"
+            android:theme="@style/Theme.KyAuth" />
         <service
             android:name=".mfa.KyAuthMessagingService"
             android:exported="false">

@@ -47,7 +47,7 @@ class MfaResponseClient {
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             val response = JSONObject(body.ifBlank { "{}" })
 
-            parseResponse(connection.responseCode, response, approve)
+            parseResponse(connection.responseCode, response, challengeId.trim())
         } catch (e: Exception) {
             MfaResponseResult.Error(e.message ?: "Network error during MFA response")
         } finally {
@@ -55,7 +55,15 @@ class MfaResponseClient {
         }
     }
 
-    internal fun parseResponse(responseCode: Int, response: JSONObject, requestedApprove: Boolean): MfaResponseResult {
+    /**
+     * A 2xx with no decision in it is a protocol error, not an approval. Reporting back whatever
+     * the client asked for would turn a broken or hostile server into a silent "approved".
+     */
+    internal fun parseResponse(
+        responseCode: Int,
+        response: JSONObject,
+        challengeId: String,
+    ): MfaResponseResult {
         if (responseCode !in 200..299) {
             val errorMsg = response.optString(
                 "error_description",
@@ -63,9 +71,17 @@ class MfaResponseClient {
             )
             return MfaResponseResult.Error(errorMsg)
         }
-        return MfaResponseResult.Success(
-            approved = response.optBoolean("success", response.optBoolean("approved", requestedApprove)),
-            deviceId = response.optString("deviceId"),
-        )
+
+        val echoedId = response.optString("challengeId").takeIf { it.isNotBlank() }
+        if (echoedId != null && echoedId != challengeId) {
+            return MfaResponseResult.Error("Server answered a different challenge")
+        }
+
+        val approved = when {
+            response.has("approved") -> response.optBoolean("approved")
+            response.has("success") -> response.optBoolean("success")
+            else -> return MfaResponseResult.Error("Server did not report a decision")
+        }
+        return MfaResponseResult.Success(approved = approved, deviceId = response.optString("deviceId"))
     }
 }

@@ -16,9 +16,10 @@ import org.kysecurity.authenticator.pairing.PairingStore
 
 class KyAuthMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
-        val fallbackServer = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
+        // Only the paired server is ever used; an unpaired device drops the message.
+        val pairedServer = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
         val challenge = runCatching {
-            MfaPushChallengeParser.parse(message.data, fallbackServer)
+            MfaPushChallengeParser.parse(message.data, pairedServer)
         }.getOrNull() ?: return
 
         MfaPushChallengeStore(this).save(challenge)

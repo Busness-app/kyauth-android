@@ -1,0 +1,137 @@
+package org.kysecurity.authenticator.passkeys
+
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.service.credentials.BeginGetCredentialOption
+import android.service.credentials.BeginGetCredentialRequest
+import android.service.credentials.BeginGetCredentialResponse
+import androidx.annotation.RequiresApi
+import org.json.JSONObject
+import org.kysecurity.authenticator.passwords.DomainMatcher
+import org.kysecurity.authenticator.passwords.PasswordEntry
+
+/**
+ * Turns a credential query plus an unlocked vault into the entries offered to the user.
+ *
+ * Shared by [KyAuthCredentialProviderService] (which only reaches it while unlocked) and
+ * [CredentialUnlockActivity] (which reaches it behind an authentication action).
+ */
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+object CredentialEntryBuilder {
+
+    fun build(
+        context: Context,
+        request: BeginGetCredentialRequest,
+        entries: List<PasswordEntry>,
+    ): BeginGetCredentialResponse {
+        val callingAppInfo = request.callingAppInfo
+        val origin = callingAppInfo?.origin
+        val webOriginHost = ClientData.webOriginHost(origin)
+        val callerPackage = callingAppInfo?.packageName
+        val callerOrigin = origin ?: ClientData.apkKeyHashOrigin(callingAppInfo?.signingInfo)
+
+        val responseBuilder = BeginGetCredentialResponse.Builder()
+        var requestCode = 1000
+        for (option in request.beginGetCredentialOptions) {
+            when (option.type) {
+                TYPE_PUBLIC_KEY, TYPE_PUBLIC_KEY_ANDX ->
+                    addPasskeyEntries(
+                        context, option, entries, webOriginHost, callerPackage, callerOrigin,
+                        responseBuilder, requestCode++,
+                    )
+                TYPE_PASSWORD, TYPE_PASSWORD_ANDX ->
+                    addPasswordEntries(
+                        context, option, entries, webOriginHost ?: callerPackage,
+                        responseBuilder, requestCode++,
+                    )
+            }
+        }
+        return responseBuilder.build()
+    }
+
+    private fun addPasskeyEntries(
+        context: Context,
+        option: BeginGetCredentialOption,
+        entries: List<PasswordEntry>,
+        webOriginHost: String?,
+        callerPackage: String?,
+        callerOrigin: String?,
+        responseBuilder: BeginGetCredentialResponse.Builder,
+        requestCode: Int,
+    ) {
+        val requestJson = option.candidateQueryData.getString(BUNDLE_KEY_REQUEST_JSON)
+            ?: option.candidateQueryData.getString(BUNDLE_KEY_REQUEST_JSON_LEGACY).orEmpty()
+        val json = runCatching { JSONObject(requestJson) }.getOrNull() ?: return
+
+        // Fail closed: an RP ID we cannot validate against the caller gets no entries at all.
+        val rpId = RpId.validate(json.optString("rpId"), webOriginHost) ?: return
+        val clientDataHash = option.candidateQueryData.getByteArray(BUNDLE_KEY_CLIENT_DATA_HASH)
+
+        for (entry in entries.filter { DomainMatcher.matchesPasskey(it, rpId) }) {
+            val passkey = entry.passkey ?: continue
+            val title = passkey.username.ifBlank { entry.title }
+            val intent = Intent(context, CredentialAuthActivity::class.java).apply {
+                putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSKEY)
+                putExtra(CredentialAuthActivity.EXTRA_ENTRY_ID, entry.id)
+                putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
+                putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
+                putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
+                putExtra(CredentialAuthActivity.EXTRA_CALLER_PACKAGE, callerPackage)
+                putExtra(CredentialAuthActivity.EXTRA_CLIENT_DATA_HASH, clientDataHash)
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, "Sign in with Passkey")
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_SUBTITLE, "$title (Passkey • $rpId)")
+            }
+            responseBuilder.addCredentialEntry(
+                CredentialSliceHelper.createGetCredentialEntry(
+                    context = context,
+                    option = option,
+                    title = title,
+                    subtitle = "Passkey • $rpId",
+                    fillIntent = intent,
+                    requestCode = requestCode,
+                ),
+            )
+        }
+    }
+
+    private fun addPasswordEntries(
+        context: Context,
+        option: BeginGetCredentialOption,
+        entries: List<PasswordEntry>,
+        origin: String?,
+        responseBuilder: BeginGetCredentialResponse.Builder,
+        requestCode: Int,
+    ) {
+        val domain = DomainMatcher.extractDomain(origin) ?: return
+        for (entry in entries.filter { it.password.isNotBlank() && DomainMatcher.matchesPassword(it, domain) }) {
+            val title = entry.username.ifBlank { entry.title }
+            val intent = Intent(context, CredentialAuthActivity::class.java).apply {
+                putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSWORD)
+                putExtra(CredentialAuthActivity.EXTRA_ENTRY_ID, entry.id)
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, "Autofill Password")
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_SUBTITLE, "$title (${entry.title})")
+            }
+            responseBuilder.addCredentialEntry(
+                CredentialSliceHelper.createGetCredentialEntry(
+                    context = context,
+                    option = option,
+                    title = title,
+                    subtitle = "Password • ${entry.title}",
+                    fillIntent = intent,
+                    requestCode = requestCode,
+                ),
+            )
+        }
+    }
+
+    const val TYPE_PUBLIC_KEY = "android.credentials.TYPE_PUBLIC_KEY_CREDENTIAL"
+    const val TYPE_PUBLIC_KEY_ANDX = "androidx.credentials.TYPE_PUBLIC_KEY_CREDENTIAL"
+    const val TYPE_PASSWORD = "android.credentials.TYPE_PASSWORD_CREDENTIAL"
+    const val TYPE_PASSWORD_ANDX = "androidx.credentials.TYPE_PASSWORD_CREDENTIAL"
+
+    const val BUNDLE_KEY_REQUEST_JSON = "androidx.credentials.BUNDLE_KEY_REQUEST_JSON"
+    const val BUNDLE_KEY_REQUEST_JSON_LEGACY =
+        "android.credentials.GetPublicKeyCredentialOption.BUNDLE_KEY_REQUEST_JSON"
+    const val BUNDLE_KEY_CLIENT_DATA_HASH = "androidx.credentials.BUNDLE_KEY_CLIENT_DATA_HASH"
+}

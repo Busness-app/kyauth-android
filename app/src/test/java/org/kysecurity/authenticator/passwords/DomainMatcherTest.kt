@@ -7,6 +7,26 @@ import org.junit.Test
 
 class DomainMatcherTest {
 
+    private fun passkeyEntry(rpId: String) = PasswordEntry(
+        title = "GitHub",
+        username = "alice",
+        passkey = PasskeyData(
+            rpId = rpId,
+            username = "alice",
+            userHandle = byteArrayOf(1, 2, 3),
+            credentialId = byteArrayOf(4, 5, 6),
+            privateKeyPkcs8 = byteArrayOf(7, 8, 9),
+        ),
+        url = "https://$rpId",
+    )
+
+    private fun passwordEntry(url: String) = PasswordEntry(
+        title = "Account",
+        username = "alice@example.com",
+        password = "secret-password",
+        url = url,
+    )
+
     @Test
     fun extractsDomainFromVariousUrls() {
         assertEquals("github.com", DomainMatcher.extractDomain("https://github.com/login"))
@@ -17,35 +37,40 @@ class DomainMatcherTest {
     }
 
     @Test
-    fun matchesEntriesCorrectly() {
-        val passkey = PasskeyData(
-            rpId = "github.com",
-            username = "alice",
-            userHandle = byteArrayOf(1, 2, 3),
-            credentialId = byteArrayOf(4, 5, 6),
-            privateKeyPkcs8 = byteArrayOf(7, 8, 9),
-        )
+    fun passwordFillsOnSubdomainsOfTheDomainItWasSavedFor() {
+        val entry = passwordEntry("https://example.com")
 
-        val passkeyEntry = PasswordEntry(
-            title = "GitHub",
-            username = "alice",
-            passkey = passkey,
-            url = "https://github.com",
-        )
+        assertTrue(DomainMatcher.matchesPassword(entry, "example.com"))
+        assertTrue(DomainMatcher.matchesPassword(entry, "accounts.example.com"))
+        assertFalse(DomainMatcher.matchesPassword(entry, "github.com"))
+    }
 
-        assertTrue(DomainMatcher.matches(passkeyEntry, "github.com"))
-        assertTrue(DomainMatcher.matches(passkeyEntry, "auth.github.com"))
-        assertFalse(DomainMatcher.matches(passkeyEntry, "google.com"))
+    @Test
+    fun passwordSavedForSubdomainDoesNotLeakToParentOrSiblings() {
+        val entry = passwordEntry("https://accounts.example.com")
 
-        val regularEntry = PasswordEntry(
-            title = "Google Account",
-            username = "alice@gmail.com",
-            password = "secret-password",
-            url = "https://accounts.google.com",
-        )
+        assertTrue(DomainMatcher.matchesPassword(entry, "accounts.example.com"))
+        assertFalse(DomainMatcher.matchesPassword(entry, "example.com"))
+        assertFalse(DomainMatcher.matchesPassword(entry, "billing.example.com"))
+    }
 
-        assertTrue(DomainMatcher.matches(regularEntry, "google.com"))
-        assertTrue(DomainMatcher.matches(regularEntry, "accounts.google.com"))
-        assertFalse(DomainMatcher.matches(regularEntry, "github.com"))
+    @Test
+    fun passwordNeverCrossesAPublicSuffixBoundary() {
+        assertFalse(DomainMatcher.matchesPassword(passwordEntry("https://co.uk"), "victim.co.uk"))
+        assertFalse(DomainMatcher.matchesPassword(passwordEntry("https://github.io"), "victim.github.io"))
+    }
+
+    @Test
+    fun passkeyMatchingIsExactOnRpId() {
+        val entry = passkeyEntry("github.com")
+
+        assertTrue(DomainMatcher.matchesPasskey(entry, "github.com"))
+        assertFalse(DomainMatcher.matchesPasskey(entry, "auth.github.com"))
+        assertFalse(DomainMatcher.matchesPasskey(entry, "google.com"))
+    }
+
+    @Test
+    fun passkeyEntryIsNotOfferedAsAPassword() {
+        assertFalse(DomainMatcher.matchesPasskey(passwordEntry("https://example.com"), "example.com"))
     }
 }

@@ -1,22 +1,24 @@
 package org.kysecurity.authenticator.passwords
 
-import android.app.assist.AssistStructure
+import android.app.PendingIntent
+import android.content.Intent
 import android.os.CancellationSignal
 import android.service.autofill.AutofillService
-import android.service.autofill.Dataset
 import android.service.autofill.FillCallback
-import android.service.autofill.FillContext
 import android.service.autofill.FillRequest
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveCallback
 import android.service.autofill.SaveRequest
-import android.view.View
-import android.view.autofill.AutofillId
-import android.view.autofill.AutofillValue
-import android.widget.RemoteViews
 import java.io.File
 import org.kysecurity.authenticator.security.AppLockManager
 
+/**
+ * Autofill provider.
+ *
+ * While KyAuth is locked no vault material is touched: the response carries an authentication
+ * [PendingIntent] instead of datasets, and the secrets are only read inside
+ * [AutofillUnlockActivity] after the user authenticates.
+ */
 class KyAuthAutofillService : AutofillService() {
 
     override fun onFillRequest(
@@ -29,140 +31,105 @@ class KyAuthAutofillService : AutofillService() {
             return
         }
 
-        val fields = ParsedFields()
-        traverseStructure(structure, fields)
-
-        val targetDomain = fields.webDomain ?: fields.packageName ?: run {
+        val fields = AutofillParser.parse(structure)
+        if (fields.targetDomain == null || fields.autofillIds.isEmpty()) {
             callback.onSuccess(null)
             return
         }
 
-        val entries = loadVaultEntries()
-        val matchingEntries = entries.filter {
-            !it.password.isNullOrBlank() && DomainMatcher.matches(it, targetDomain)
+        if (!AppLockManager.isUnlocked()) {
+            callback.onSuccess(unlockResponse(fields))
+            return
         }
 
-        if (matchingEntries.isEmpty()) {
+        val vaultKey = AppLockManager.getPasswordVaultKey() ?: run {
+            callback.onSuccess(unlockResponse(fields))
+            return
+        }
+        val entries = runCatching {
+            KdbxPasswordVault.loadEntries(File(filesDir, VAULT_FILE_NAME), vaultKey)
+        }.getOrNull() ?: run {
+            // An undecodable vault is not an empty vault: offer nothing rather than a wrong answer.
             callback.onSuccess(null)
             return
         }
 
-        val responseBuilder = FillResponse.Builder()
-
-        for (entry in matchingEntries) {
-            val presentation = RemoteViews(packageName, android.R.layout.simple_list_item_2).apply {
-                setTextViewText(android.R.id.text1, "${entry.title} (${entry.username})")
-                setTextViewText(android.R.id.text2, "KyAuth Password")
-            }
-
-            val datasetBuilder = Dataset.Builder(presentation)
-            var hasValue = false
-
-            fields.usernameId?.let { id ->
-                datasetBuilder.setValue(id, AutofillValue.forText(entry.username), presentation)
-                hasValue = true
-            }
-
-            fields.passwordId?.let { id ->
-                datasetBuilder.setValue(id, AutofillValue.forText(entry.password), presentation)
-                hasValue = true
-            }
-
-            if (hasValue) {
-                responseBuilder.addDataset(datasetBuilder.build())
-            }
-        }
-
-        callback.onSuccess(responseBuilder.build())
+        callback.onSuccess(AutofillParser.buildDatasets(this, fields, entries))
     }
 
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: run {
-            callback.onSuccess()
+            callback.onFailure("No form data to save")
             return
         }
 
-        val fields = ParsedFields()
-        traverseStructure(structure, fields)
+        val vaultKey = AppLockManager.getPasswordVaultKey() ?: run {
+            callback.onFailure("Unlock KyAuth to save this password")
+            return
+        }
 
-        val domain = fields.webDomain ?: fields.packageName ?: "Unknown"
-        val username = fields.usernameValue.orEmpty()
+        val fields = AutofillParser.parse(structure)
         val password = fields.passwordValue.orEmpty()
+        val domain = fields.targetDomain
+        if (password.isBlank() || domain == null) {
+            callback.onFailure("No password to save")
+            return
+        }
 
-        if (password.isNotBlank()) {
-            val vaultKey = AppLockManager.getPasswordVaultKey() ?: AppLockManager.ensurePasswordVaultKeyInitialized(applicationContext)
-            if (vaultKey != null) {
-                val vaultFile = File(filesDir, "passwords_vault.kdbx")
-                val entries = KdbxPasswordVault.loadEntries(vaultFile, vaultKey).toMutableList()
-
-                val existingIndex = entries.indexOfFirst {
-                    DomainMatcher.matches(it, domain) && it.username.equals(username, ignoreCase = true)
-                }
-
-                if (existingIndex >= 0) {
-                    val existing = entries[existingIndex]
-                    entries[existingIndex] = existing.copy(password = password, url = existing.url ?: "https://$domain")
-                } else {
-                    val title = if (username.isNotBlank()) "$domain ($username)" else domain
-                    entries.add(
-                        PasswordEntry(
-                            title = title,
-                            username = username,
-                            password = password,
-                            url = if (domain.contains("://")) domain else "https://$domain",
-                        ),
-                    )
-                }
-                KdbxPasswordVault.saveEntries(vaultFile, vaultKey, entries)
+        val saved = runCatching {
+            KdbxPasswordVault.update(File(filesDir, VAULT_FILE_NAME), vaultKey) { entries ->
+                entries.upserted(domain, fields.usernameValue.orEmpty(), password)
+                true
             }
-        }
+        }.isSuccess
 
-        callback.onSuccess()
+        if (saved) callback.onSuccess() else callback.onFailure("Could not save to the KyAuth vault")
     }
 
-    private fun loadVaultEntries(): List<PasswordEntry> {
-        val vaultKey = AppLockManager.getPasswordVaultKey() ?: AppLockManager.ensurePasswordVaultKeyInitialized(applicationContext)
-            ?: return emptyList()
-        val vaultFile = File(filesDir, "passwords_vault.kdbx")
-        return runCatching { KdbxPasswordVault.loadEntries(vaultFile, vaultKey) }.getOrDefault(emptyList())
+    /** A single "unlock" affordance; selecting it launches the authenticated fill. */
+    private fun unlockResponse(fields: ParsedFields): FillResponse {
+        val intent = Intent(this, AutofillUnlockActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return FillResponse.Builder()
+            .setAuthentication(
+                fields.autofillIds,
+                pendingIntent.intentSender,
+                AutofillParser.presentation(this, "Unlock KyAuth", "Authenticate to fill"),
+            )
+            .build()
     }
 
-    private fun traverseStructure(structure: AssistStructure, fields: ParsedFields) {
-        val nodes = structure.windowNodeCount
-        for (i in 0 until nodes) {
-            val windowNode = structure.getWindowNodeAt(i)
-            traverseViewNode(windowNode.rootViewNode, fields)
-        }
+    companion object {
+        const val VAULT_FILE_NAME = "passwords_vault.kdbx"
     }
+}
 
-    private fun traverseViewNode(node: AssistStructure.ViewNode, fields: ParsedFields) {
-        node.webDomain?.let { fields.webDomain = it }
-        node.idPackage?.let { if (fields.packageName == null) fields.packageName = it }
-
-        val hints = node.autofillHints?.toList().orEmpty()
-        val isPasswordType = node.inputType and (android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD or android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) != 0
-        val isUsernameHint = hints.any { it.contains("username", ignoreCase = true) || it.contains("email", ignoreCase = true) }
-        val isPasswordHint = hints.any { it.contains("password", ignoreCase = true) }
-
-        if (isPasswordHint || isPasswordType) {
-            fields.passwordId = node.autofillId
-            node.autofillValue?.textValue?.toString()?.let { fields.passwordValue = it }
-        } else if (isUsernameHint) {
-            fields.usernameId = node.autofillId
-            node.autofillValue?.textValue?.toString()?.let { fields.usernameValue = it }
-        }
-
-        for (i in 0 until node.childCount) {
-            traverseViewNode(node.getChildAt(i), fields)
-        }
+/** Replaces the matching entry for [domain]/[username], or appends a new one. */
+internal fun MutableList<PasswordEntry>.upserted(
+    domain: String,
+    username: String,
+    password: String,
+): List<PasswordEntry> {
+    val index = indexOfFirst {
+        DomainMatcher.matchesPassword(it, domain) && it.username.equals(username, ignoreCase = true)
     }
-
-    private class ParsedFields {
-        var webDomain: String? = null
-        var packageName: String? = null
-        var usernameId: AutofillId? = null
-        var passwordId: AutofillId? = null
-        var usernameValue: String? = null
-        var passwordValue: String? = null
+    val url = if (domain.contains("://")) domain else "https://$domain"
+    if (index >= 0) {
+        this[index] = this[index].copy(password = password, url = this[index].url ?: url)
+    } else {
+        add(
+            PasswordEntry(
+                title = if (username.isNotBlank()) "$domain ($username)" else domain,
+                username = username,
+                password = password,
+                url = url,
+            ),
+        )
     }
+    return this
 }

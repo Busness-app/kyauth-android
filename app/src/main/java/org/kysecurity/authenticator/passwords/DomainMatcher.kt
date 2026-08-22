@@ -30,42 +30,40 @@ object DomainMatcher {
     }
 
     fun normalizeHost(host: String): String {
-        var normalized = host.trim().lowercase()
+        var normalized = host.trim().lowercase().trim('.')
         if (normalized.startsWith("www.")) {
             normalized = normalized.removePrefix("www.")
         }
         return normalized
     }
 
-    fun matches(entry: PasswordEntry, targetDomainOrRpId: String): Boolean {
-        val target = normalizeHost(targetDomainOrRpId)
+    /**
+     * Password fill matching. A credential saved for a parent domain may fill on its subdomains,
+     * never the reverse, and never across a registry boundary — otherwise a credential stored for
+     * `example.com` would be offered on `attacker.example.com`, and one stored for a shared host
+     * such as `github.io` would be offered to every tenant on it.
+     */
+    fun matchesPassword(entry: PasswordEntry, targetDomain: String): Boolean {
+        val target = normalizeHost(targetDomain)
         if (target.isBlank()) return false
-
-        // Check explicit passkey RP ID
-        entry.passkey?.let {
-            val passkeyRp = normalizeHost(it.rpId)
-            if (domainsMatch(passkeyRp, target)) return true
-        }
-
-        // Check entry URL
-        entry.url?.let {
-            val entryDomain = extractDomain(it)
-            if (entryDomain != null && domainsMatch(entryDomain, target)) return true
-        }
-
-        // Check entry title if it looks like a domain
-        val titleDomain = extractDomain(entry.title)
-        if (titleDomain != null && domainsMatch(titleDomain, target)) {
-            return true
-        }
-
-        return false
+        val candidates = listOfNotNull(entry.url?.let(::extractDomain), extractDomain(entry.title))
+        return candidates.any { domainsMatch(it, target) }
     }
 
-    fun domainsMatch(candidate: String, target: String): Boolean {
-        if (candidate == target) return true
-        // Allow subdomain matches, e.g. auth.example.com matches example.com
-        if (candidate.endsWith(".$target") || target.endsWith(".$candidate")) return true
-        return false
+    /**
+     * Passkey matching. WebAuthn scopes a credential to exactly one RP ID, so this is an exact
+     * comparison: a passkey for `example.com` is not a passkey for `login.example.com`.
+     */
+    fun matchesPasskey(entry: PasswordEntry, rpId: String): Boolean {
+        val passkey = entry.passkey ?: return false
+        return normalizeHost(passkey.rpId) == normalizeHost(rpId)
+    }
+
+    /** True when a credential scoped to [entryDomain] may be used on [target]. */
+    fun domainsMatch(entryDomain: String, target: String): Boolean {
+        if (entryDomain.isBlank() || target.isBlank()) return false
+        if (entryDomain == target) return true
+        if (!target.endsWith(".$entryDomain")) return false
+        return !PublicSuffix.isPublicSuffix(entryDomain)
     }
 }

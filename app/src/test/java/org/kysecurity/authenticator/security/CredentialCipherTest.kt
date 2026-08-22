@@ -49,8 +49,8 @@ class CredentialCipherTest {
     fun biometricDerivedKeyRecoversWrappedVaultKey() {
         val salt = CredentialCipher.generateRandomSalt()
         val vaultKey = CredentialCipher.generateVaultKey()
-        val wrapped = CredentialCipher.wrap(vaultKey, CredentialCipher.deriveBiometricKey(salt, testPepper))
+        val wrapped = CredentialCipher.wrap(vaultKey, CredentialCipher.deriveLegacyWrapKey(salt, testPepper))
 
-        assertArrayEquals(vaultKey, CredentialCipher.unwrap(wrapped, CredentialCipher.deriveBiometricKey(salt, testPepper)))
+        assertArrayEquals(vaultKey, CredentialCipher.unwrap(wrapped, CredentialCipher.deriveLegacyWrapKey(salt, testPepper)))
     }
 }

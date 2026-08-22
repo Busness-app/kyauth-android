@@ -15,16 +15,14 @@ import app.keemobile.kotpass.models.Meta
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.UUID
+import org.kysecurity.authenticator.security.writeAtomically
 
+/** Serialized like [org.kysecurity.authenticator.passwords.KdbxPasswordVault]; load throws on a corrupt vault. */
 object KdbxTotpVault {
     private const val VAULT_GROUP_NAME = "KyAuth TOTP"
 
+    @Synchronized
     fun loadEntries(vaultFile: File, vaultKey: ByteArray): List<TotpEntry> {
         if (!vaultFile.exists() || vaultFile.length() == 0L) {
             return emptyList()
@@ -59,6 +57,7 @@ object KdbxTotpVault {
         return entries
     }
 
+    @Synchronized
     fun saveEntries(vaultFile: File, vaultKey: ByteArray, entries: List<TotpEntry>) {
         val credentials = Credentials.from(EncryptedValue.fromString(bytesToHex(vaultKey)))
 
@@ -89,17 +88,7 @@ object KdbxTotpVault {
 
         val out = ByteArrayOutputStream()
         updatedDb.encode(out)
-        vaultFile.parentFile?.mkdirs()
-        val temporaryFile = File(vaultFile.parentFile, ".${vaultFile.name}.tmp")
-        FileOutputStream(temporaryFile).use { output ->
-            output.write(out.toByteArray())
-            output.fd.sync()
-        }
-        try {
-            Files.move(temporaryFile.toPath(), vaultFile.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(temporaryFile.toPath(), vaultFile.toPath(), REPLACE_EXISTING)
-        }
+        writeAtomically(vaultFile, out.toByteArray())
     }
 
     private fun bytesToHex(bytes: ByteArray): String =

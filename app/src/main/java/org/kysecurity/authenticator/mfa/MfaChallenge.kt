@@ -7,10 +7,11 @@ data class MfaChallenge(
     val serverUrl: String,
     val username: String? = null,
     val purpose: String = "session",
-    val timestampEpochMs: Long = System.currentTimeMillis(),
+    val expiresAtEpochMs: Long = System.currentTimeMillis(),
 ) {
     init {
         require(challengeId.isNotBlank()) { "Challenge ID is required" }
+        require(serverUrl.isNotBlank()) { "Server URL is required" }
     }
 
     /**
@@ -29,6 +30,11 @@ object MfaMessage {
     /**
      * Builds the exact domain-separated byte array that the device must sign with its
      * hardware-backed ECDSA P-256 key to answer a challenge.
+     *
+     * The payload does not yet bind the server origin, account or expiry. Doing so is the right
+     * fix for a compromised push sender, but changes the wire format and needs a matching
+     * KySignOn change; until then the client refuses to answer any server but the paired one.
+     * Tracked in AGENTS.md.
      */
     fun formatPayload(challengeId: String, approve: Boolean, selectedDigits: String): ByteArray {
         val verb = if (approve) "approve" else "deny"

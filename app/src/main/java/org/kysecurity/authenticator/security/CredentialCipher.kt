@@ -101,7 +101,12 @@ object CredentialCipher {
         return SecretKeySpec(peppered, "AES")
     }
 
-    fun deriveBiometricKey(salt: ByteArray, pepper: CredentialPepper = KeystoreCredentialPepper): SecretKeySpec =
+    /**
+     * Pre-[VaultKek] wrapping key. It is derived from a Keystore HMAC key that is NOT bound to user
+     * authentication, so it protects nothing against in-process code. Retained only so
+     * [AppLockManager] can migrate an existing v0.1 vault once, behind a successful prompt.
+     */
+    fun deriveLegacyWrapKey(salt: ByteArray, pepper: CredentialPepper = KeystoreCredentialPepper): SecretKeySpec =
         SecretKeySpec(pepper.mix(salt), "AES")
 
     fun hashPinForStorage(pin: String, salt: ByteArray, pepper: CredentialPepper = KeystorePinPepper): String {

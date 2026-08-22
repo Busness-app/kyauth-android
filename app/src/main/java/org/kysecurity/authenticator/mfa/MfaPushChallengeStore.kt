@@ -6,16 +6,39 @@ import org.json.JSONObject
 
 object MfaPushChallengeParser {
     const val DEFAULT_EXPIRES_AFTER_MS = 5 * 60 * 1000L
+    const val MAX_EXPIRES_AFTER_MS = 10 * 60 * 1000L
+    const val MAX_DECOYS = 3
 
-    fun parse(data: Map<String, String>, fallbackServerUrl: String?): MfaChallenge {
+    private val DIGITS = Regex("\\d{2}")
+
+    /**
+     * Parses an FCM data message into a challenge.
+     *
+     * [pairedServerUrl] is the server this device is paired with and is the only server a response
+     * may be sent to: a push payload that names its own server would let anyone who can reach the
+     * FCM sender collect a valid device signature. Anything in the payload that would widen the
+     * challenge — unbounded expiry, malformed or excess digits — is rejected or clamped.
+     */
+    fun parse(data: Map<String, String>, pairedServerUrl: String?, nowMs: Long = System.currentTimeMillis()): MfaChallenge {
+        val serverUrl = pairedServerUrl?.trim().orEmpty()
+        require(serverUrl.isNotBlank()) { "KyAuth is not paired with a server" }
+
         val challengeId = first(data, "challengeId", "challenge_id", "id")
         val matchDigits = firstOrNull(data, "matchDigits", "match_digits", "match").orEmpty()
-        val serverUrl = firstOrNull(data, "serverUrl", "server_url") ?: fallbackServerUrl.orEmpty()
+        require(matchDigits.isBlank() || DIGITS.matches(matchDigits)) { "Malformed match digits" }
+
         val decoys = parseDecoys(firstOrNull(data, "decoyDigits", "decoy_digits", "decoys"))
-        val receivedAt = System.currentTimeMillis()
-        val expiresAt = firstOrNull(data, "expiresAtEpochMs", "expires_at_ms", "expiresAtMs")?.toLongOrNull()
+            .filter { DIGITS.matches(it) }
+            .distinct()
+            .filter { it != matchDigits }
+            .take(MAX_DECOYS)
+
+        val claimedExpiry = firstOrNull(data, "expiresAtEpochMs", "expires_at_ms", "expiresAtMs")?.toLongOrNull()
             ?: firstOrNull(data, "expiresAt", "expires_at")?.toLongOrNull()?.times(1_000)
-            ?: (receivedAt + DEFAULT_EXPIRES_AFTER_MS)
+            ?: (nowMs + DEFAULT_EXPIRES_AFTER_MS)
+        val expiresAt = claimedExpiry.coerceAtMost(nowMs + MAX_EXPIRES_AFTER_MS)
+        require(expiresAt > nowMs) { "Challenge has already expired" }
+
         return MfaChallenge(
             challengeId = challengeId,
             matchDigits = matchDigits,
@@ -23,7 +46,7 @@ object MfaPushChallengeParser {
             serverUrl = serverUrl,
             username = firstOrNull(data, "username", "user"),
             purpose = firstOrNull(data, "purpose") ?: "session",
-            timestampEpochMs = expiresAt,
+            expiresAtEpochMs = expiresAt,
         )
     }
 
@@ -62,10 +85,10 @@ class MfaPushChallengeStore(context: Context) {
     }
 
     fun isExpired(challenge: MfaChallenge, nowMs: Long = System.currentTimeMillis()): Boolean =
-        nowMs >= challenge.timestampEpochMs
+        nowMs >= challenge.expiresAtEpochMs
 
     fun secondsRemaining(challenge: MfaChallenge, nowMs: Long = System.currentTimeMillis()): Long =
-        maxOf(0, (challenge.timestampEpochMs - nowMs + 999) / 1_000)
+        maxOf(0, (challenge.expiresAtEpochMs - nowMs + 999) / 1_000)
 
     fun clear() {
         preferences.edit().clear().apply()
@@ -78,7 +101,7 @@ class MfaPushChallengeStore(context: Context) {
         .put("serverUrl", challenge.serverUrl)
         .put("username", challenge.username)
         .put("purpose", challenge.purpose)
-        .put("timestampEpochMs", challenge.timestampEpochMs)
+        .put("expiresAtEpochMs", challenge.expiresAtEpochMs)
         .toString()
 
     private fun decode(value: String): MfaChallenge {
@@ -91,7 +114,7 @@ class MfaPushChallengeStore(context: Context) {
             serverUrl = json.getString("serverUrl"),
             username = json.optString("username").takeIf { it.isNotBlank() },
             purpose = json.optString("purpose", "session"),
-            timestampEpochMs = json.optLong("timestampEpochMs", System.currentTimeMillis()),
+            expiresAtEpochMs = json.getLong("expiresAtEpochMs"),
         )
     }
 }
