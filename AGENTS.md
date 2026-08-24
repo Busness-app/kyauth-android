@@ -70,7 +70,7 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - `passwords/`: password/passkey entry models, domain matcher, password generator, autofill service, and KDBX persistence.
 - `passkeys/`: FIDO2 WebAuthn crypto engine, `ClientData` (CollectedClientData), `RpId` validation, CredentialProviderService, entry builder, slice builder, unlock activity, and auth activity.
 - `ThemeManager.kt`: the shared 15-theme palette and local theme preference.
-- `AboutDialog.kt`: GPL-3.0-only About dialog.
+- `AboutDialog.kt`: MIT About dialog.
 
 ## Work guidance
 

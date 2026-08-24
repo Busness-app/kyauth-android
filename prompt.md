@@ -10,7 +10,7 @@ KyAuth is an on-device authenticator for the KySecurity suite.
 - Protect the app with biometric or device authentication and an optional PIN.
 - Apply PIN delays and wipe local data after five failed PIN attempts.
 - Show a Push MFA interface and send signed approve or deny responses.
-- Offer 15 suite color themes and a GPL-3.0-only About dialog.
+- Offer 15 suite color themes and an MIT About dialog.
 
 ## Accepted decisions
 

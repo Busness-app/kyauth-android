@@ -72,7 +72,7 @@ fun showAboutDialog(activity: Activity) {
         setPadding(0, 0, 0, dp(10))
     })
     val license = TextView(activity).apply {
-        text = activity.resources.openRawResource(R.raw.gpl_license).bufferedReader().use { it.readText() }
+        text = activity.resources.openRawResource(R.raw.mit_license).bufferedReader().use { it.readText() }
         textSize = 12.5f
         setTextColor(mutedColor)
         setTextIsSelectable(true)

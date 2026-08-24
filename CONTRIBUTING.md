@@ -44,4 +44,4 @@ Update relevant Markdown files when a user-visible behavior, license, or contrib
 
 ## License
 
-KyAuth uses GPL-3.0-only. By contributing, you license your contribution under GPL-3.0-only.
+KyAuth uses the MIT License. By contributing, you license your contribution under MIT.
