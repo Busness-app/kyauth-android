@@ -87,7 +87,7 @@ class CredentialAuthActivity : AppCompatActivity() {
         }
 
         val appLabel = TextView(this).apply {
-            text = "KyAuth"
+            text = getString(R.string.app_name)
             setTextColor(ThemeManager.color(this@CredentialAuthActivity, R.color.ky_cyan))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
@@ -138,7 +138,7 @@ class CredentialAuthActivity : AppCompatActivity() {
             })
 
             val generateButton = Button(this).apply {
-                text = "Generate Strong Password"
+                text = getString(R.string.generate_strong_password)
                 setTextColor(ThemeManager.color(this@CredentialAuthActivity, R.color.ky_cyan))
                 background = GradientDrawable().apply {
                     setColor(ThemeManager.color(this@CredentialAuthActivity, R.color.ky_surface_elevated))
@@ -171,7 +171,7 @@ class CredentialAuthActivity : AppCompatActivity() {
         }
 
         val cancelButton = Button(this).apply {
-            text = "Cancel"
+            text = getString(R.string.cancel)
             setTextColor(ThemeManager.color(this@CredentialAuthActivity, R.color.ky_muted))
             background = GradientDrawable().apply {
                 setColor(ThemeManager.color(this@CredentialAuthActivity, R.color.ky_surface_elevated))

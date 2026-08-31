@@ -222,6 +222,7 @@ class KyPasswordClient {
         vaultFile: File,
         expectedVersion: Long,
         deviceId: String? = null,
+        passwordEnvelope: String? = null,
     ): Long {
         require(vaultFile.exists() && vaultFile.length() > 0) {
             "Cannot upload empty or nonexistent vault file (${vaultFile.name})"
@@ -241,6 +242,9 @@ class KyPasswordClient {
             setRequestProperty("If-Match", "\"$expectedVersion\"")
             if (!deviceId.isNullOrBlank()) {
                 setRequestProperty("X-Device-ID", deviceId)
+            }
+            if (!passwordEnvelope.isNullOrBlank()) {
+                setRequestProperty("X-Password-Envelope", passwordEnvelope)
             }
         }
 

@@ -69,12 +69,14 @@ import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordPairingParse
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordServerAccount
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordStore
 import org.kysecurity.authenticator.security.AppLockManager
+import org.kysecurity.authenticator.security.CredentialCipher
 import org.kysecurity.authenticator.security.VaultUnlockPrompt
 import org.kysecurity.authenticator.security.PinFailurePolicy
 import org.kysecurity.authenticator.security.PinPolicy
 import org.kysecurity.authenticator.security.SecurityWipe
 import org.kysecurity.authenticator.totp.KdbxTotpVault
 import org.kysecurity.authenticator.totp.TotpEntry
+import org.kysecurity.authenticator.totp.TotpDisplay
 import org.kysecurity.authenticator.totp.TotpGenerator
 import org.kysecurity.authenticator.totp.TotpUriParser
 import java.io.File
@@ -84,6 +86,8 @@ import java.util.UUID
 import java.util.concurrent.Executor
 import kotlin.math.max
 import kotlin.math.min
+
+private const val STATE_ACTIVE_TAB = "active_tab"
 
 class MainActivity : AppCompatActivity() {
     private lateinit var store: PairingStore
@@ -99,13 +103,20 @@ class MainActivity : AppCompatActivity() {
     private var passwordEntries = mutableListOf<PasswordEntry>()
     private var copiedSensitiveLabel: String? = null
     private var isVaultLoading = false
+    private data class TotpViews(
+        val entry: TotpEntry,
+        val code: TextView,
+        val timer: TextView,
+        val progress: ProgressBar,
+    )
+    private val totpViews = mutableListOf<TotpViews>()
     private val vaultFile: File by lazy { File(filesDir, "totp_vault.kdbx") }
     private val passwordVaultFile: File by lazy { File(filesDir, "passwords_vault.kdbx") }
 
     private val ticker = object : Runnable {
         override fun run() {
             if (!isVaultLoading && AppLockManager.isUnlocked() && activeTab == Tab.TOTP) {
-                renderContent()
+                updateTotpViews()
             }
             handler.postDelayed(this, 1000)
         }
@@ -115,6 +126,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activeTab = savedInstanceState?.getString(STATE_ACTIVE_TAB)
+            ?.let { runCatching { Tab.valueOf(it) }.getOrNull() } ?: Tab.TOTP
         WindowCompat.setDecorFitsSystemWindows(window, false)
         if (!BuildConfig.ALLOW_SCREENSHOTS) {
             window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
@@ -129,6 +142,9 @@ class MainActivity : AppCompatActivity() {
         loadPendingPushChallenge()
         if (!AppLockManager.isUnlocked()) {
             unlockWithPrompt(silent = true)
+        } else {
+            runCatching { loadTotpEntries() }
+            runCatching { loadPasswordEntries() }
         }
         renderContent()
         requestNotificationPermissionIfNeeded()
@@ -142,6 +158,11 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(ticker)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_ACTIVE_TAB, activeTab.name)
+        super.onSaveInstanceState(outState)
     }
 
     private fun renderContent() {
@@ -184,7 +205,7 @@ class MainActivity : AppCompatActivity() {
                         pairing.onSuccess { showPairingConfirmation(it, this, progress, error) }
                             .onFailure { error.text = it.message ?: "Invalid KySignOn QR code" }
                     }
-                    .addOnFailureListener { error.text = "Unable to scan QR code" }
+                    .addOnFailureListener { error.text = getString(R.string.scan_failed) }
             }
         }
 
@@ -258,7 +279,7 @@ class MainActivity : AppCompatActivity() {
                 val tokenOrPin = tokenInput.text.toString().trim()
                 val userId = userInput.text.toString().trim().ifBlank { null }
                 if (serverUrl.isBlank() || tokenOrPin.isBlank()) {
-                    error.text = "Server URL and Pairing Token/PIN are required"
+                    error.text = getString(R.string.manual_pairing_required)
                     return@setPositiveButton
                 }
 
@@ -281,7 +302,7 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(kyAuthWordmark(textSize = 34f, iconSizeDp = 64, centered = true))
         root.addView(TextView(this).apply {
-            text = "VAULT LOCKED"
+            text = getString(R.string.vault_locked)
             textSize = 12f
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
@@ -290,14 +311,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(4), 0, dp(24))
         })
         root.addView(TextView(this).apply {
-            text = "Unlock your vault"
+            text = getString(R.string.unlock_your_vault)
             textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(ThemeManager.color(context, R.color.ky_text))
         })
         root.addView(TextView(this).apply {
-            text = "Paired to ${account.serverUrl}\nAuthenticate to access your codes and sign-in approvals."
+            text = getString(R.string.paired_to, account.serverUrl)
             textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
@@ -315,10 +336,10 @@ class MainActivity : AppCompatActivity() {
         val retryWaitSec = PinFailurePolicy.secondsUntilRetry(failureState, nowSec)
 
         if (retryWaitSec > 0) {
-            error.text = "Too many failed attempts. Try again in $retryWaitSec seconds."
+            error.text = getString(R.string.pin_retry_wait, retryWaitSec)
         } else if (failureState.failedAttempts > 0) {
             val remaining = PinFailurePolicy.attemptsRemaining(failureState)
-            error.text = "Failed attempt. $remaining attempts remaining before automatic data wipe."
+            error.text = getString(R.string.pin_attempts_remaining, remaining)
         }
 
         val btnBiometric = primaryButton(getString(R.string.unlock_biometrics)).apply {
@@ -403,13 +424,14 @@ class MainActivity : AppCompatActivity() {
     // ==========================================
 
     private fun renderTotpTab(container: LinearLayout) {
+        totpViews.clear()
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = fullWidthParams(bottom = 16)
         }
         val headerTitle = TextView(this).apply {
-            text = "TOTP Vault"
+            text = getString(R.string.tab_totp)
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
@@ -450,15 +472,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = fullWidthParams(bottom = 12)
             }
 
-            // One unusable entry must not take down the whole tab: without this the user can
-            // never reach the delete button for it.
-            val code = runCatching { TotpGenerator.generate(entry, nowSec) }.getOrNull()
-            val remainingSec = TotpGenerator.secondsRemaining(entry, nowSec)
-            val formattedCode = when {
-                code == null -> getString(R.string.totp_code_unavailable)
-                code.length == 6 -> "${code.substring(0, 3)} ${code.substring(3)}"
-                else -> code
-            }
+            val display = TotpDisplay.state(entry, nowSec, getString(R.string.totp_code_unavailable))
 
             val titleView = TextView(this).apply {
                 text = entry.title
@@ -479,32 +493,35 @@ class MainActivity : AppCompatActivity() {
             }
 
             val codeView = TextView(this).apply {
-                text = formattedCode
+                text = display.formattedCode
                 textSize = 34f
                 typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
                 setTextColor(ThemeManager.color(context, R.color.ky_cyan))
                 setPadding(0, 8, 0, 8)
                 setOnClickListener {
-                    if (code == null) return@setOnClickListener
+                    val current = TotpDisplay.state(entry, System.currentTimeMillis() / 1000, getString(R.string.totp_code_unavailable))
+                    val code = current.code ?: return@setOnClickListener
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    copyTotpCode(clipboard, code, remainingSec)
+                    copyTotpCode(clipboard, code, current.remainingSeconds)
                     Toast.makeText(this@MainActivity, getString(R.string.copy_code), Toast.LENGTH_SHORT).show()
                 }
             }
             val timerView = TextView(this).apply {
-                text = "TAP TO COPY  ·  EXPIRES IN $remainingSec S"
+                text = getString(R.string.totp_expiry, display.remainingSeconds)
                 textSize = 14f
                 setTextColor(ThemeManager.color(context, R.color.ky_muted))
             }
 
             card.addView(codeView)
             card.addView(timerView)
-            card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            val progressView = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                 progressTintList = ColorStateList.valueOf(ThemeManager.color(context, R.color.ky_cyan))
                 progressBackgroundTintList = ColorStateList.valueOf(ThemeManager.color(context, R.color.ky_border))
                 max = entry.periodSeconds.toInt()
-                progress = max(0, remainingSec.toInt())
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply { topMargin = dp(14) })
+                progress = max(0, display.remainingSeconds.toInt())
+            }
+            card.addView(progressView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4)).apply { topMargin = dp(14) })
+            totpViews.add(TotpViews(entry, codeView, timerView, progressView))
 
             entry.notes?.let { notes ->
                 val notesView = TextView(this).apply {
@@ -525,20 +542,31 @@ class MainActivity : AppCompatActivity() {
         addAdaptiveCards(container, cards)
     }
 
+    private fun updateTotpViews() {
+        val now = System.currentTimeMillis() / 1000
+        val unavailable = getString(R.string.totp_code_unavailable)
+        totpViews.forEach { views ->
+            val display = TotpDisplay.state(views.entry, now, unavailable)
+            views.code.text = display.formattedCode
+            views.timer.text = getString(R.string.totp_expiry, display.remainingSeconds)
+            views.progress.progress = max(0, display.remainingSeconds.toInt())
+        }
+    }
+
     private fun showAddTotpOptionsDialog() {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(24), dp(24), dp(20))
         }
         val titleView = TextView(this).apply {
-            text = "Add to TOTP Vault"
+            text = getString(R.string.add_to_totp_vault)
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
             setPadding(0, 0, 0, dp(4))
         }
         val messageView = TextView(this).apply {
-            text = "Scan a QR code from your service or enter account details manually."
+            text = getString(R.string.add_totp_choice)
             textSize = 14f
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
             setPadding(0, 0, 0, dp(18))
@@ -595,7 +623,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, dp(4))
         }
         val subtitleView = TextView(this).apply {
-            text = "Add a TOTP authentication code to your encrypted vault."
+            text = getString(R.string.add_totp_description)
             textSize = 14f
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
             setPadding(0, 0, 0, dp(16))
@@ -673,7 +701,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(24), dp(24), dp(20))
         }
         val titleView = TextView(this).apply {
-            text = "Edit Account"
+            text = getString(R.string.edit_account)
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
@@ -905,12 +933,16 @@ class MainActivity : AppCompatActivity() {
         if (vaultKey == null) {
             if (kyAccount == null) {
                 val card = settingsCard().apply {
-                    addView(title("KyPasswords Server Required"))
-                    addView(message("The Passwords & Passkeys tab obtains its vault keyfile from a paired KyPasswords server.\n\nThe app does not generate its own password keyfile."))
-                    val btnPair = primaryButton("Pair KyPasswords Server").apply {
+                    addView(title("Set up Passwords & Passkeys"))
+                    addView(message("Create an encrypted vault stored only on this device, or pair a KyPasswords server for sync."))
+                    val btnLocal = primaryButton("Create Local Vault").apply {
+                        setOnClickListener { createLocalPasswordVault() }
+                    }
+                    val btnPair = secondaryButton("Pair KyPasswords Server").apply {
                         setOnClickListener { showPairKyPasswordsDialog() }
                     }
-                    addView(btnPair, fullWidthParams(top = 12))
+                    addView(btnLocal, fullWidthParams(top = 12, bottom = 8))
+                    addView(btnPair, fullWidthParams())
                 }
                 container.addView(card, fullWidthParams())
                 return
@@ -966,12 +998,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             errorBanner.addView(TextView(this).apply {
-                text = "⚠️ Sync Issue: ${kyAccount.lastSyncError}"
+                text = getString(R.string.sync_issue, kyAccount.lastSyncError)
                 textSize = 13f
                 setTextColor(ThemeManager.color(context, R.color.ky_error))
             })
             errorBanner.addView(TextView(this).apply {
-                text = "Tap to view details or retry sync."
+                text = getString(R.string.sync_issue_action)
                 textSize = 12f
                 setTextColor(ThemeManager.color(context, R.color.ky_muted))
                 setPadding(0, dp(2), 0, 0)
@@ -1013,7 +1045,7 @@ class MainActivity : AppCompatActivity() {
 
             if (entry.isPasskey) {
                 headerRow.addView(TextView(this).apply {
-                    text = "PASSKEY"
+                    text = getString(R.string.passkey_badge)
                     textSize = 11f
                     typeface = Typeface.DEFAULT_BOLD
                     setTextColor(ThemeManager.color(context, R.color.ky_cyan))
@@ -1046,6 +1078,23 @@ class MainActivity : AppCompatActivity() {
         addAdaptiveCards(container, cards)
     }
 
+    private fun createLocalPasswordVault() {
+        val vaultKey = CredentialCipher.generateVaultKey()
+        runCatching {
+            KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, emptyList())
+            AppLockManager.setPasswordVaultKey(this, vaultKey)
+            passwordEntries.clear()
+        }.onSuccess {
+            Toast.makeText(this, "Local password vault created", Toast.LENGTH_SHORT).show()
+            renderContent()
+        }.onFailure {
+            AppLockManager.clearPasswordVaultKey(this)
+            vaultKey.fill(0)
+            passwordVaultFile.delete()
+            Toast.makeText(this, "Could not create the local password vault", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun showAddPasswordDialog() {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1067,7 +1116,7 @@ class MainActivity : AppCompatActivity() {
             styleInput(this)
         }
         form.addView(TextView(this).apply {
-            text = "Stored only in your separate local password vault."
+            text = getString(R.string.local_password_storage)
             setTextColor(ThemeManager.color(this@MainActivity, R.color.ky_muted))
             textSize = 14f
         }, fullWidthParams(bottom = 16))
@@ -1122,14 +1171,14 @@ class MainActivity : AppCompatActivity() {
         if (entry.isPasskey) {
             val passkey = entry.passkey!!
             container.addView(TextView(this).apply {
-                text = "FIDO2 / WebAuthn Passkey"
+                text = getString(R.string.webauthn_passkey)
                 textSize = 18f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(ThemeManager.color(context, R.color.ky_cyan))
                 setPadding(0, dp(12), 0, dp(4))
             })
             container.addView(TextView(this).apply {
-                text = "Relying Party: ${passkey.rpId}\nSignatures: ${passkey.signCount}"
+                text = getString(R.string.passkey_details, passkey.rpId, passkey.signCount)
                 textSize = 14f
                 setTextColor(ThemeManager.color(context, R.color.ky_text))
                 setPadding(0, 0, 0, dp(12))
@@ -1180,14 +1229,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(24), dp(24), dp(20))
         }
         val titleView = TextView(this).apply {
-            text = "Pair KyPasswords Server"
+            text = getString(R.string.pair_kypasswords_server)
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
             setPadding(0, 0, 0, dp(8))
         }
         val subtitleView = TextView(this).apply {
-            text = "Scan the QR code shown on your KyPasswords web dashboard (Security -> Pair Device), or enter the 6-digit PIN manually."
+            text = getString(R.string.pair_kypasswords_description)
             textSize = 14f
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
             setPadding(0, 0, 0, dp(16))
@@ -1241,7 +1290,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(16), dp(24), dp(16))
         }
         val titleView = TextView(this).apply {
-            text = "Manual KyPasswords Pairing"
+            text = getString(R.string.manual_kypasswords_pairing)
             textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
@@ -1300,10 +1349,22 @@ class MainActivity : AppCompatActivity() {
                     userId = session.userId,
                     vaultVersion = metadata.version,
                 )
-                kyPasswordStore.save(account)
 
                 runOnUiThread {
-                    showUnlockKyPasswordsDialog(account, metadata)
+                    if (passwordEntries.isNotEmpty()) {
+                        if (metadata.version == 0L) {
+                            showUploadLocalVaultDialog(account)
+                        } else {
+                            AlertDialog.Builder(this)
+                                .setTitle("Server Vault Already Exists")
+                                .setMessage("This device and server use different vault keys. The local vault was not changed or uploaded.")
+                                .setPositiveButton("OK", null)
+                                .showKyDialog()
+                        }
+                    } else {
+                        kyPasswordStore.save(account)
+                        showUnlockKyPasswordsDialog(account, metadata)
+                    }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -1311,6 +1372,52 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    private fun showUploadLocalVaultDialog(account: KyPasswordServerAccount) {
+        val passwordInput = EditText(this).apply {
+            hint = "KyPasswords vault password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            styleInput(this)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Upload Local Vault")
+            .setMessage("Choose the password that will unlock this vault in KyPasswords. The server receives only the encrypted vault and wrapped key.")
+            .setView(passwordInput)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Upload") { _, _ ->
+                val password = passwordInput.text.toString()
+                val vaultKey = AppLockManager.getPasswordVaultKey()
+                if (password.isBlank() || vaultKey == null) {
+                    Toast.makeText(this, "A vault password is required", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                Thread {
+                    runCatching {
+                        val envelope = KyPasswordEnvelopeCrypto.wrapVaultKey(vaultKey, password)
+                        val version = kyPasswordClient.uploadVault(
+                            serverUrl = account.serverUrl,
+                            sessionToken = account.sessionToken,
+                            vaultFile = passwordVaultFile,
+                            expectedVersion = 0L,
+                            deviceId = account.deviceId,
+                            passwordEnvelope = envelope,
+                        )
+                        kyPasswordStore.save(account.copy(vaultVersion = version))
+                        version
+                    }.onSuccess { version ->
+                        runOnUiThread {
+                            Toast.makeText(this, "Local vault uploaded to KyPasswords (v$version)", Toast.LENGTH_SHORT).show()
+                            renderContent()
+                        }
+                    }.onFailure { error ->
+                        runOnUiThread {
+                            Toast.makeText(this, "Upload failed: ${error.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            }
+            .showKyDialog()
     }
 
     private fun showUnlockKyPasswordsDialog(
@@ -1322,14 +1429,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(16), dp(24), dp(16))
         }
         val titleView = TextView(this).apply {
-            text = "Unlock KyPasswords Keyfile"
+            text = getString(R.string.unlock_kypasswords_keyfile)
             textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
             setPadding(0, 0, 0, dp(4))
         }
         val subtitleView = TextView(this).apply {
-            text = "Enter your KyPasswords Master Password or Paper Recovery Key to unwrap your vault keyfile."
+            text = getString(R.string.unlock_kypasswords_description)
             textSize = 14f
             setTextColor(ThemeManager.color(context, R.color.ky_muted))
             setPadding(0, 0, 0, dp(12))
@@ -1716,7 +1823,7 @@ class MainActivity : AppCompatActivity() {
             kyPasswordsSection.addView(btnSync, fullWidthParams(top = 10, bottom = 6))
             kyPasswordsSection.addView(btnUnpair, fullWidthParams())
         } else {
-            kyPasswordsSection.addView(message("Pair with a KyPasswords server to obtain your password and passkey vault keyfile."))
+            kyPasswordsSection.addView(message("A KyPasswords server is optional. Pair one to sync passwords and passkeys across devices."))
             val btnPair = primaryButton("Pair KyPasswords Server").apply {
                 setOnClickListener { showPairKyPasswordsDialog() }
             }
@@ -1819,7 +1926,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(24), dp(24), dp(20))
         }
         val titleView = TextView(this).apply {
-            text = "Select Theme"
+            text = getString(R.string.select_theme)
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(ThemeManager.color(context, R.color.ky_text))
@@ -2001,8 +2108,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
     private fun loadPendingPushChallenge() {
         MfaPushChallengeStore(this).load()?.let {
             pendingChallenge = it
@@ -2085,52 +2190,6 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun title(value: String) = TextView(this).apply {
-        text = value
-        textSize = 22f
-        setTextColor(ThemeManager.color(context, R.color.ky_text))
-        typeface = Typeface.DEFAULT_BOLD
-        setPadding(0, dp(16), 0, dp(8))
-    }
-
-    private fun message(value: String) = TextView(this).apply {
-        text = value
-        textSize = 15f
-        setTextColor(ThemeManager.color(context, R.color.ky_muted))
-        setPadding(0, dp(4), 0, dp(16))
-    }
-
-    private fun primaryButton(label: String) = Button(this).apply {
-        text = label
-        transformationMethod = null
-        background = roundedButtonBackground(R.color.ky_cyan)
-        setTextColor(ThemeManager.buttonText(context))
-        typeface = Typeface.DEFAULT_BOLD
-        minHeight = dp(48)
-        stateListAnimator = null
-        elevation = 0f
-    }
-
-    private fun secondaryButton(label: String) = Button(this).apply {
-        text = label
-        transformationMethod = null
-        background = roundedButtonBackground(R.color.ky_surface_elevated, R.color.ky_border)
-        setTextColor(ThemeManager.color(context, R.color.ky_cyan))
-        minHeight = dp(48)
-        stateListAnimator = null
-        elevation = 0f
-    }
-
-    private fun ghostButton(label: String) = Button(this).apply {
-        text = label
-        transformationMethod = null
-        backgroundTintList = ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
-        setTextColor(ThemeManager.color(context, R.color.ky_cyan))
-        textSize = 14f
-        stateListAnimator = null
-        elevation = 0f
-    }
-
     private fun bottomNavigation() = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
@@ -2188,29 +2247,6 @@ class MainActivity : AppCompatActivity() {
         addView(destination(getString(R.string.tab_settings), Tab.SETTINGS))
     }
 
-    private fun numberButton(label: String) = Button(this).apply {
-        text = label
-        textSize = 24f
-        typeface = Typeface.DEFAULT_BOLD
-        backgroundTintList = ColorStateList.valueOf(ThemeManager.color(context, R.color.ky_surface))
-        setTextColor(ThemeManager.color(context, R.color.ky_text))
-        stateListAnimator = null
-        elevation = 0f
-    }
-
-    private fun styleInput(editText: EditText) {
-        editText.apply {
-            setTextColor(ThemeManager.color(context, R.color.ky_text))
-            setHintTextColor(ThemeManager.color(context, R.color.ky_muted))
-            background = GradientDrawable().apply {
-                setColor(ThemeManager.color(context, R.color.ky_surface))
-                setStroke(dp(1), ThemeManager.color(context, R.color.ky_border))
-                cornerRadius = dp(14).toFloat()
-            }
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
-    }
-
     private fun AlertDialog.Builder.showKyDialog(): AlertDialog {
         return create().apply {
             val background = GradientDrawable().apply {
@@ -2247,14 +2283,6 @@ class MainActivity : AppCompatActivity() {
             }
             show()
         }
-    }
-
-    private fun fullWidthParams(top: Int = 0, bottom: Int = 0) = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-        topMargin = dp(top)
-        bottomMargin = dp(bottom)
     }
 
     private fun centeredWidthParams(top: Int = 0, bottom: Int = 0, maxWidthDp: Int) = LinearLayout.LayoutParams(
@@ -2311,46 +2339,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun isExpandedWidth() = resources.configuration.screenWidthDp >= 840
 
-    private fun cardBackground() = GradientDrawable().apply {
-        setColor(ThemeManager.color(this@MainActivity, R.color.ky_surface))
-        setStroke(dp(1), ThemeManager.color(this@MainActivity, R.color.ky_border))
-        cornerRadius = dp(20).toFloat()
-    }
-
-    private fun settingsCard() = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = cardBackground()
-        setPadding(dp(16), dp(4), dp(16), dp(16))
-        layoutParams = fullWidthParams(bottom = 12)
-    }
-
-    private fun roundedButtonBackground(colorRes: Int, strokeRes: Int? = null) = GradientDrawable().apply {
-        setColor(ThemeManager.color(this@MainActivity, colorRes))
-        strokeRes?.let { setStroke(dp(1), ThemeManager.color(this@MainActivity, it)) }
-        cornerRadius = dp(24).toFloat()
-    }
-
-    private fun emptyState(title: String, message: String): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER
-        background = cardBackground()
-        setPadding(dp(24), dp(42), dp(24), dp(42))
-        addView(TextView(context).apply {
-            text = title
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(ThemeManager.color(context, R.color.ky_text))
-            gravity = Gravity.CENTER
-        })
-        addView(TextView(context).apply {
-            text = message
-            textSize = 14f
-            setTextColor(ThemeManager.color(context, R.color.ky_muted))
-            gravity = Gravity.CENTER
-            setPadding(dp(40), dp(8), dp(40), 0)
-        })
-    }
-
     private fun mfaEmptyState() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER
@@ -2373,7 +2361,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(12), 0, dp(8))
         })
         addView(TextView(context).apply {
-            text = "New sign-in requests will appear here."
+            text = getString(R.string.mfa_empty_description)
             textSize = 14f
             gravity = Gravity.CENTER
             setTextColor(ThemeManager.color(context, R.color.ky_muted))

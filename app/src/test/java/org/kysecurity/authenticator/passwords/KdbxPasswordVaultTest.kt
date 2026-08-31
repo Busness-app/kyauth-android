@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.kysecurity.authenticator.security.CredentialCipher
 
 class KdbxPasswordVaultTest {
     @get:Rule
@@ -14,7 +15,7 @@ class KdbxPasswordVaultTest {
     @Test
     fun writesAndReadsPasswordEntriesWithoutATotpVault() {
         val vaultFile = File(tempFolder.root, "passwords_vault.kdbx")
-        val vaultKey = ByteArray(32) { (it + 7).toByte() }
+        val vaultKey = CredentialCipher.generateVaultKey()
         val entries = listOf(
             PasswordEntry(
                 title = "KySignOn",

@@ -26,12 +26,12 @@ class ParsedFields {
 
 object AutofillParser {
 
-    fun parse(structure: AssistStructure): ParsedFields {
+    fun parse(context: Context, structure: AssistStructure): ParsedFields {
         val fields = ParsedFields()
         // The activity component is filled in by the system, unlike anything in the view tree.
         val callerPackage = runCatching { structure.activityComponent?.packageName }.getOrNull()
         fields.packageName = callerPackage
-        fields.trustWebDomain = TrustedBrowsers.isTrusted(callerPackage)
+        fields.trustWebDomain = TrustedBrowsers.isTrusted(context, callerPackage)
         for (i in 0 until structure.windowNodeCount) {
             traverse(structure.getWindowNodeAt(i).rootViewNode, fields)
         }

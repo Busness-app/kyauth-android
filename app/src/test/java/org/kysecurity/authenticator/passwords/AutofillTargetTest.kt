@@ -41,11 +41,11 @@ class AutofillTargetTest {
 
     @Test
     fun onlyKnownBrowsersAreTrusted() {
-        assertTrue(TrustedBrowsers.isTrusted("com.android.chrome"))
-        assertTrue(TrustedBrowsers.isTrusted("org.mozilla.firefox"))
-        assertFalse(TrustedBrowsers.isTrusted("com.evil.app"))
-        assertFalse(TrustedBrowsers.isTrusted("com.android.chrome.evil"))
-        assertFalse(TrustedBrowsers.isTrusted(null))
+        assertTrue(TrustedBrowsers.isKnownPackage("com.android.chrome"))
+        assertTrue(TrustedBrowsers.isKnownPackage("org.mozilla.firefox"))
+        assertFalse(TrustedBrowsers.isKnownPackage("com.evil.app"))
+        assertFalse(TrustedBrowsers.isKnownPackage("com.android.chrome.evil"))
+        assertFalse(TrustedBrowsers.isKnownPackage(null))
     }
 
     @Test
