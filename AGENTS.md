@@ -24,7 +24,7 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - Release builds disable screenshots and Android backup.
 - Push MFA receives KySignOn FCM data-message challenges, posts a local notification, and opens the Push MFA tab for approve/deny. A response is only ever sent to the paired server; a `serverUrl` in the push payload is ignored. Digits must be two-digit, decoys are capped at 3, and expiry is clamped to 10 minutes.
 - An MFA response must carry an explicit decision. A 2xx with no `approved`/`success` field is a protocol error, not an approval.
-- Passwords and Passkeys use `passwords_vault.kdbx`. The app does not generate its own password keyfile; it obtains its keyfile from a paired KyPasswords server (`/api/devices/pairing/redeem` and `/api/vault/metadata` envelope unwrapping).
+- Passwords and Passkeys use `passwords_vault.kdbx`. The app can generate an independent random local vault key for device-only storage. Pairing with an empty KyPasswords account uploads that local vault with a client-created password envelope; pairing never replaces an existing server vault that uses another key.
 - Passkeys use native ES256 / P-256 WebAuthn cryptography with COSE public key encoding and ECDSA assertion signing.
 - KyAuth acts as an Android 14+ (API 34+) system Credential Provider for both Passkeys and Passwords via `KyAuthCredentialProviderService` (with `CredentialAuthActivity`) and an Android 12+ (API 31+) system Autofill Service via `KyAuthAutofillService`.
 - While locked, neither provider touches vault material. Autofill returns a `FillResponse` with an
@@ -40,7 +40,8 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   (`ClientData.privilegedClientDataHash`). Only a holder of `CREDENTIAL_MANAGER_SET_ORIGIN` can set
   that origin, so an ordinary app cannot choose the bytes KyAuth signs. For every other caller the
   `CollectedClientData` is built here, with the `android:apk-key-hash:` origin.
-- Autofill believes a request's `webDomain` only from a package in `TrustedBrowsers`; any other
+- Autofill believes a request's `webDomain` only from a known browser installed as a system app or
+  by Google Play; any other
   caller is matched on its own package. `setWebDomain` is public API, so an unfiltered domain from an
   arbitrary app would hand one site's credential to another.
 - Password fill matches an entry's domain or its subdomains, never a parent or sibling, and never
@@ -70,6 +71,7 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - `passwords/`: password/passkey entry models, domain matcher, password generator, autofill service, and KDBX persistence.
 - `passkeys/`: FIDO2 WebAuthn crypto engine, `ClientData` (CollectedClientData), `RpId` validation, CredentialProviderService, entry builder, slice builder, unlock activity, and auth activity.
 - `ThemeManager.kt`: the shared 15-theme palette and local theme preference.
+- `UiComponents.kt`: reusable programmatic view styling and controls.
 - `AboutDialog.kt`: MIT About dialog.
 
 ## Work guidance
@@ -83,20 +85,19 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 
 ## Verification
 
-Run the unit tests and build the debug APK:
+Run unit tests, lint, the debug build, and compile device tests:
 
 ```bash
-./gradlew test assembleDebug
+./gradlew test lintDebug assembleDebug compileDebugAndroidTestSources
 ```
 
 ## Outstanding security work
 
 Recorded so it is not mistaken for done:
 
-- **Public Suffix List.** `PublicSuffix` is a short bundled list, not the real PSL.
-- **Trusted browser signing certificates.** `TrustedBrowsers` matches on package name only. Package
-  names are unique on a device, but a sideloaded app can claim one that is not installed; pinning
-  each browser's signing certificate would close that.
+- **Non-Play browser builds.** `TrustedBrowsers` accepts known browser packages only when installed
+  by Google Play or as system apps. F-Droid and direct-download builds fail closed until explicit
+  signing-certificate pins are maintained for them.
 - **Vault size ceilings.** `KyPasswordClient` and `KdbxPasswordVault` cap a synced vault at 25 MB and
   a JSON body at 1 MB. Large legitimate vaults would need these raised.
 - **Push MFA payload binding.** `MfaMessage.formatPayload` still signs only
@@ -105,8 +106,9 @@ Recorded so it is not mistaken for done:
 - **Passkey private keys are exportable.** Deliberate: they live in the KDBX vault so they sync and
   restore, as other password managers do. Protection comes from the authentication-bound vault key.
   Non-exportable Keystore keys would make passkeys device-only.
-- **Device verification.** `VaultKek`, `useVaultKeys` and both provider unlock flows cannot be
-  covered by JVM unit tests. They are unverified until exercised on a device or emulator.
+- **Device verification.** Emulator tests cover secure-lock-backed `VaultKek` creation and backup
+  flags. Full biometric prompts, `useVaultKeys`, and provider unlock flows still require manual
+  device verification.
 - **Deprecated platform APIs.** `Slice`, `EncryptedSharedPreferences`/`MasterKey`, and the
   `Dataset`/`FillResponse` builders are deprecated. Moving to `androidx.credentials` would remove
   most of the Slice usage.

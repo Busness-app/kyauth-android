@@ -1,0 +1,33 @@
+name: Android
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - run: ./gradlew test assembleDebug lintDebug
+
+  device:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          script: |
+            adb shell locksettings set-pin 246810
+            ./gradlew connectedDebugAndroidTest

@@ -31,7 +31,7 @@ class KyAuthAutofillService : AutofillService() {
             return
         }
 
-        val fields = AutofillParser.parse(structure)
+        val fields = AutofillParser.parse(this, structure)
         if (fields.targetDomain == null || fields.autofillIds.isEmpty()) {
             callback.onSuccess(null)
             return
@@ -68,7 +68,7 @@ class KyAuthAutofillService : AutofillService() {
             return
         }
 
-        val fields = AutofillParser.parse(structure)
+        val fields = AutofillParser.parse(this, structure)
         val password = fields.passwordValue.orEmpty()
         val domain = fields.targetDomain
         if (password.isBlank() || domain == null) {

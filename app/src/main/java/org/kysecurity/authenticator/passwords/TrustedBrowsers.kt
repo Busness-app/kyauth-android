@@ -1,5 +1,9 @@
 package org.kysecurity.authenticator.passwords
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.os.Build
+
 /**
  * The packages whose `webDomain` KyAuth is willing to believe.
  *
@@ -12,8 +16,9 @@ package org.kysecurity.authenticator.passwords
  * package instead. The list is deliberately conservative: a browser missing from it falls back to
  * package matching and simply offers nothing, which is the safe direction to be wrong in.
  *
- * Package names are unique on a device, but a sideloaded app can still claim one that is not
- * installed. Pinning each browser's signing certificate is the remaining hardening step.
+ * A package is accepted only when Android installed it as a system app or Google Play installed
+ * it. Those authorities bind package ownership to signing identity, rejecting a sideloaded app
+ * that merely claims a known browser package name.
  */
 object TrustedBrowsers {
     private val PACKAGES = setOf(
@@ -42,5 +47,17 @@ object TrustedBrowsers {
         "com.ecosia.android",
     )
 
-    fun isTrusted(packageName: String?): Boolean = packageName != null && packageName in PACKAGES
+    fun isTrusted(context: Context, packageName: String?): Boolean {
+        val trustedPackage = packageName?.takeIf(::isKnownPackage) ?: return false
+        return runCatching {
+            val info = context.packageManager.getApplicationInfo(trustedPackage, 0)
+            val system = info.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+            val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context.packageManager.getInstallSourceInfo(trustedPackage).installingPackageName
+            } else null
+            system || installer == "com.android.vending"
+        }.getOrDefault(false)
+    }
+
+    internal fun isKnownPackage(packageName: String?): Boolean = packageName != null && packageName in PACKAGES
 }

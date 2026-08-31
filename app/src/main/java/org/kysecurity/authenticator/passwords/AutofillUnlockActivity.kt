@@ -37,7 +37,7 @@ class AutofillUnlockActivity : AppCompatActivity() {
     }
 
     private fun respond(structure: AssistStructure, cipher: Cipher) {
-        val fields = AutofillParser.parse(structure)
+        val fields = AutofillParser.parse(this, structure)
         val response = AppLockManager.useVaultKeys(applicationContext, cipher) { keys ->
             val vaultKey = keys.passwords ?: return@useVaultKeys null
             val entries = runCatching {

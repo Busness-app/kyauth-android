@@ -58,6 +58,8 @@ class DomainMatcherTest {
     fun passwordNeverCrossesAPublicSuffixBoundary() {
         assertFalse(DomainMatcher.matchesPassword(passwordEntry("https://co.uk"), "victim.co.uk"))
         assertFalse(DomainMatcher.matchesPassword(passwordEntry("https://github.io"), "victim.github.io"))
+        assertTrue(PublicSuffix.isPublicSuffix("foo.ck"))
+        assertFalse(PublicSuffix.isPublicSuffix("www.ck"))
     }
 
     @Test
