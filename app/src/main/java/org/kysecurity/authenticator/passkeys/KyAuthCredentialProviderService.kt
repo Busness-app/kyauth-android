@@ -21,6 +21,7 @@ import android.service.credentials.CredentialProviderService
 import androidx.annotation.RequiresApi
 import java.io.File
 import org.json.JSONObject
+import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.KyAuthAutofillService
@@ -47,11 +48,58 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
     }
 
     private fun buildGetResponse(request: BeginGetCredentialRequest): BeginGetCredentialResponse {
-        val vaultKey = AppLockManager.getPasswordVaultKey() ?: return lockedResponse()
-        val entries = runCatching {
-            KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
-        }.getOrNull() ?: return lockedResponse()
-        return CredentialEntryBuilder.build(this, request, entries)
+        // EncryptedSharedPreferences can throw (GeneralSecurityException/IOException, e.g. after a
+        // device restore or Keystore keyset invalidation); this runs before the vault check below,
+        // so it must fail closed the same way rather than crashing the process.
+        val signOnPasskey = runCatching { SignOnPasskeyStore(this).record() }.getOrNull()
+        val serverUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
+        val vaultKey = AppLockManager.getPasswordVaultKey()
+        val entries = vaultKey?.let {
+            runCatching {
+                KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), it)
+            }.getOrNull()
+        }
+        // Nothing local to offer and no vault: short-circuit before the builder runs. The builder
+        // can trigger a DigitalAssetLinks HTTPS fetch to a caller-named host, and a locked device
+        // with no enrolled KySignOn passkey must not let an arbitrary native app cause that with no
+        // user interaction.
+        if (signOnPasskey == null && entries == null) {
+            return BeginGetCredentialResponse.Builder()
+                .addAuthenticationAction(unlockAction())
+                .build()
+        }
+        // While the vault is unavailable the KySignOn passkey is still offered: it needs no vault
+        // key, and routing it through "Unlock KyAuth" would make KySignOn MFA depend on the
+        // password vault, which is exactly what this design removes.
+        return CredentialEntryBuilder.build(
+            context = this,
+            request = request,
+            entries = entries.orEmpty(),
+            signOnPasskey = signOnPasskey,
+            signOnServerUrl = serverUrl,
+            authenticationAction = if (entries == null) unlockAction() else null,
+        )
+    }
+
+    /** An invitation to authenticate; touches no vault material. */
+    private fun unlockAction(): Action {
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            3001,
+            Intent(this, CredentialUnlockActivity::class.java),
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val spec = SliceSpec("kyauth", 1)
+        val slice = Slice.Builder(Uri.parse("kyauth://unlock"), spec)
+            .addAction(
+                pendingIntent,
+                Slice.Builder(Uri.parse("kyauth://unlock/action"), spec).build(),
+                null,
+            )
+            .addText("Unlock KyAuth", null, listOf(Slice.HINT_TITLE))
+            .addText("Authenticate to see your credentials", null, listOf(Slice.HINT_SUMMARY))
+            .build()
+        return Action(slice)
     }
 
     override fun onBeginCreateCredential(
@@ -86,15 +134,45 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                 ) {
                     return responseBuilder.build()
                 }
+                // EncryptedSharedPreferences can throw after a device restore or keyset
+                // invalidation, and this runs on a bare Thread in a Service: an uncaught throw
+                // would kill the process with the OutcomeReceiver never called, hanging the
+                // picker. A failed read is also not "unpaired" — it cannot rule out that this is
+                // KySignOn — so it refuses rather than falling through to the vault path.
+                val pairing = runCatching { PairingStore(this).account()?.serverUrl }
+                if (pairing.isFailure) return responseBuilder.build()
+                val serverUrl = pairing.getOrNull()
+                val isSignOn = SignOnPasskey.isSignOnRpId(rpId, serverUrl)
+                // KySignOn-ish but not exactly routable to hardware: offer no create entry at all.
+                // Minting here would write a KySignOn login private key into passwords_vault.kdbx,
+                // which syncs to KyPasswords and holds it exportably. See refusesVaultPasskeyCreate.
+                if (refusesVaultPasskeyCreate(rpId, serverUrl)) return responseBuilder.build()
                 val userObj = json.optJSONObject("user")
                 val username = userObj?.optString("name")?.ifBlank { null }
                     ?: userObj?.optString("displayName").orEmpty()
 
-                val title = if (username.isNotBlank()) "Create Passkey for $username" else "Create Passkey"
-                val subtitle = "Save Passkey for $rpId in KyAuth"
+                val title = if (isSignOn) {
+                    "Create KySignOn Passkey"
+                } else if (username.isNotBlank()) {
+                    "Create Passkey for $username"
+                } else {
+                    "Create Passkey"
+                }
+                val subtitle = if (isSignOn) {
+                    "Stays on this device, in secure hardware"
+                } else {
+                    "Save Passkey for $rpId in KyAuth"
+                }
 
                 val intent = Intent(this, CredentialAuthActivity::class.java).apply {
-                    putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_CREATE_PASSKEY)
+                    putExtra(
+                        CredentialAuthActivity.EXTRA_ACTION,
+                        if (isSignOn) {
+                            CredentialAuthActivity.ACTION_CREATE_SIGNON_PASSKEY
+                        } else {
+                            CredentialAuthActivity.ACTION_CREATE_PASSKEY
+                        },
+                    )
                     putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
                     putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
                     putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
@@ -169,28 +247,5 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
         callback: OutcomeReceiver<Void?, ClearCredentialStateException>,
     ) {
         callback.onResult(null)
-    }
-
-    /** No entries, no vault access: just an invitation to authenticate. */
-    private fun lockedResponse(): BeginGetCredentialResponse {
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            3001,
-            Intent(this, CredentialUnlockActivity::class.java),
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val spec = SliceSpec("kyauth", 1)
-        val slice = Slice.Builder(Uri.parse("kyauth://unlock"), spec)
-            .addAction(
-                pendingIntent,
-                Slice.Builder(Uri.parse("kyauth://unlock/action"), spec).build(),
-                null,
-            )
-            .addText("Unlock KyAuth", null, listOf(Slice.HINT_TITLE))
-            .addText("Authenticate to see your credentials", null, listOf(Slice.HINT_SUMMARY))
-            .build()
-        return BeginGetCredentialResponse.Builder()
-            .addAuthenticationAction(Action(slice))
-            .build()
     }
 }

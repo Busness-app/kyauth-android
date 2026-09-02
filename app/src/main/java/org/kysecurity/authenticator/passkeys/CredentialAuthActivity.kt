@@ -29,12 +29,14 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.util.UUID
 import javax.crypto.Cipher
 import org.json.JSONObject
 import org.kysecurity.authenticator.R
 import org.kysecurity.authenticator.ThemeManager
+import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.KyAuthAutofillService
@@ -51,6 +53,17 @@ class CredentialAuthActivity : AppCompatActivity() {
     private lateinit var usernameInput: EditText
     private lateinit var passwordInput: EditText
 
+    /**
+     * True from the moment an enrolment claims the spare alias until the Activity finishes.
+     *
+     * Two taps of Save before the BiometricPrompt takes focus would both see no stored record,
+     * pick the same spare alias, and the second generate() would destroy the first key while its
+     * prompt was still live — registering a public key on the server whose private half no longer
+     * exists. Guarded with a flag rather than by disabling the button: the button is a local in
+     * onCreate and not the only way in, and the resource being protected is the alias, not the tap.
+     */
+    private var enrolling = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -61,7 +74,9 @@ class CredentialAuthActivity : AppCompatActivity() {
 
         val promptTitle = intent.getStringExtra(EXTRA_DISPLAY_TITLE) ?: "KyAuth Verification"
         val promptSubtitle = intent.getStringExtra(EXTRA_DISPLAY_SUBTITLE) ?: ""
-        val isCreation = action == ACTION_CREATE_PASSWORD || action == ACTION_CREATE_PASSKEY
+        val isCreation = action == ACTION_CREATE_PASSWORD ||
+            action == ACTION_CREATE_PASSKEY ||
+            action == ACTION_CREATE_SIGNON_PASSKEY
 
         val rootLayout = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -153,7 +168,7 @@ class CredentialAuthActivity : AppCompatActivity() {
             card.addView(generateButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (42 * density).toInt()).apply {
                 bottomMargin = (18 * density).toInt()
             })
-        } else if (action == ACTION_CREATE_PASSKEY) {
+        } else if (action == ACTION_CREATE_PASSKEY || action == ACTION_CREATE_SIGNON_PASSKEY) {
             val initialUser = intent.getStringExtra(EXTRA_USERNAME).orEmpty()
             usernameInput = EditText(this).apply {
                 hint = "Username or display name"
@@ -229,6 +244,14 @@ class CredentialAuthActivity : AppCompatActivity() {
     }
 
     private fun authenticateAndExecute(action: String) {
+        if (action == ACTION_GET_SIGNON_PASSKEY) {
+            getSignOnPasskey()
+            return
+        }
+        if (action == ACTION_CREATE_SIGNON_PASSKEY) {
+            createSignOnPasskey()
+            return
+        }
         val isCreation = action == ACTION_CREATE_PASSWORD || action == ACTION_CREATE_PASSKEY
         VaultUnlockPrompt.show(
             activity = this,
@@ -242,6 +265,253 @@ class CredentialAuthActivity : AppCompatActivity() {
                 }
             },
         )
+    }
+
+    /**
+     * Asserts with the hardware-backed KySignOn passkey. Deliberately never calls
+     * [AppLockManager.useVaultKeys]: the private key is non-exportable and there is no vault key
+     * to unwrap, so this path is unaffected by the password vault's state.
+     *
+     * Known and deliberate, as on the vault path: the request's `allowCredentials` is ignored.
+     * There is at most one KySignOn passkey per device, so the only effect is asserting with it
+     * when the RP asked for a credential id this device does not hold, which the RP then rejects.
+     */
+    private fun getSignOnPasskey() {
+        val store = SignOnPasskeyStore(applicationContext)
+        val record = store.record() ?: return finishWithFailure("No KySignOn passkey on this device")
+
+        val requestJson = intent.getStringExtra(EXTRA_REQUEST_JSON).orEmpty()
+        val json = runCatching { JSONObject(requestJson) }.getOrNull()
+            ?: return finishWithFailure("Malformed passkey request")
+        val rpId = intent.getStringExtra(EXTRA_RP_ID)?.takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no relying party")
+        if (RpId.normalize(json.optString("rpId")) != rpId) {
+            return finishWithFailure("Relying party does not match the request")
+        }
+        if (record.rpId != rpId) {
+            return finishWithFailure("This passkey does not belong to $rpId")
+        }
+        val challenge = json.optString("challenge").takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no challenge")
+
+        val callerHash = intent.privilegedClientDataHash()
+        val clientDataJson = if (callerHash != null) {
+            null
+        } else {
+            val origin = intent.getStringExtra(EXTRA_ORIGIN)?.takeIf { it.isNotBlank() }
+                ?: return finishWithFailure("Caller origin is unavailable")
+            ClientData.serialize(
+                ClientData.TYPE_GET,
+                challenge,
+                origin,
+                intent.getStringExtra(EXTRA_CALLER_PACKAGE),
+            )
+        }
+        val clientDataHash = callerHash ?: WebAuthnEngine.sha256(requireNotNull(clientDataJson))
+
+        val signature = SignOnPasskeyKey.signatureFor(record.alias)
+            ?: return finishWithFailure(
+                "This KySignOn passkey is no longer usable. Enrol a new one from KySignOn.",
+            )
+
+        VaultUnlockPrompt.showForSignature(
+            activity = this,
+            subtitle = "Sign in to KySignOn",
+            signature = signature,
+            onAuthenticated = { authenticated ->
+                val newSignCount = record.signCount + 1
+                val authData = WebAuthnEngine.buildAssertionAuthData(record.rpId, newSignCount)
+                val signed = runCatching {
+                    WebAuthnEngine.signAssertion(authenticated, authData, clientDataHash)
+                }.getOrNull()
+                if (signed == null) {
+                    finishWithFailure("Could not sign the challenge")
+                    return@showForSignature
+                }
+
+                store.save(record.copy(signCount = newSignCount))
+
+                val responseJson = JSONObject().apply {
+                    put("id", b64(record.credentialId))
+                    put("rawId", b64(record.credentialId))
+                    put("type", "public-key")
+                    put(
+                        "response",
+                        JSONObject().apply {
+                            put("authenticatorData", b64(authData))
+                            put("signature", b64(signed))
+                            if (record.userHandle.isNotEmpty()) put("userHandle", b64(record.userHandle))
+                            if (clientDataJson != null) put("clientDataJSON", b64(clientDataJson))
+                        },
+                    )
+                }
+                val data = Bundle().apply {
+                    putString("androidx.credentials.BUNDLE_KEY_AUTHENTICATION_RESPONSE_JSON", responseJson.toString())
+                }
+                setResult(
+                    Activity.RESULT_OK,
+                    Intent().putExtra(
+                        CredentialProviderService.EXTRA_GET_CREDENTIAL_RESPONSE,
+                        GetCredentialResponse(Credential(TYPE_PUBLIC_KEY_CREDENTIAL, data)),
+                    ),
+                )
+                finish()
+            },
+            onFailed = { finishWithCancellation() },
+        )
+    }
+
+    /**
+     * Enrols the KySignOn passkey into secure hardware. Nothing here touches a vault key: that
+     * independence is the point, so the factor keeps working when the password vault does not.
+     *
+     * The new key goes into the spare alias. The stored record is replaced and the old key
+     * deleted only once the new key has been generated and authenticated, so a cancelled prompt
+     * leaves any existing passkey untouched; the response is assembled immediately after.
+     */
+    private fun createSignOnPasskey() {
+        if (enrolling) return
+        enrolling = true
+        val requestJson = intent.getStringExtra(EXTRA_REQUEST_JSON).orEmpty()
+        val json = runCatching { JSONObject(requestJson) }.getOrNull()
+            ?: return finishWithFailure("Malformed passkey request")
+        val rpId = intent.getStringExtra(EXTRA_RP_ID)?.takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no relying party")
+        if (RpId.normalize(json.optJSONObject("rp")?.optString("id")) != rpId) {
+            return finishWithFailure("Relying party does not match the request")
+        }
+        // EncryptedSharedPreferences can throw after a device restore or keyset invalidation; a
+        // null here just means the RP cannot be confirmed as KySignOn, and enrolment fails closed.
+        val pairedServerUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
+        if (!SignOnPasskey.isSignOnRpId(rpId, pairedServerUrl)) {
+            return finishWithFailure("This relying party is not the paired KySignOn server")
+        }
+        val challenge = json.optString("challenge").takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no challenge")
+
+        val clientDataJson = if (intent.privilegedClientDataHash() != null) {
+            null
+        } else {
+            val origin = intent.getStringExtra(EXTRA_ORIGIN)?.takeIf { it.isNotBlank() }
+                ?: return finishWithFailure("Caller origin is unavailable")
+            ClientData.serialize(
+                ClientData.TYPE_CREATE,
+                challenge,
+                origin,
+                intent.getStringExtra(EXTRA_CALLER_PACKAGE),
+            )
+        }
+
+        val store = SignOnPasskeyStore(applicationContext)
+        val live = store.record()
+        val alias = SignOnPasskeyKey.spareAlias(live?.alias)
+        val generated = runCatching { SignOnPasskeyKey.generate(alias) }.getOrElse {
+            return finishWithFailure("This device cannot store a KySignOn passkey in secure hardware")
+        }
+        val signature = SignOnPasskeyKey.signatureFor(alias) ?: run {
+            SignOnPasskeyKey.delete(alias)
+            return finishWithFailure("The new passkey could not be prepared")
+        }
+
+        VaultUnlockPrompt.showForSignature(
+            activity = this,
+            subtitle = "Create your KySignOn passkey",
+            signature = signature,
+            onAuthenticated = { authenticated ->
+                finishSignOnEnrolment(rpId, json, generated, live, store, clientDataJson, authenticated)
+            },
+            onFailed = { message ->
+                // Roll back so a cancelled enrolment cannot strand the live key.
+                SignOnPasskeyKey.delete(alias)
+                Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+                finishWithCancellation()
+            },
+        )
+    }
+
+    private fun finishSignOnEnrolment(
+        rpId: String,
+        json: JSONObject,
+        generated: SignOnPasskeyKey.Generated,
+        live: SignOnPasskeyRecord?,
+        store: SignOnPasskeyStore,
+        clientDataJson: ByteArray?,
+        authenticated: Signature,
+    ) {
+        // Exercise the key once before the server is told it exists. The attestation is fmt:none
+        // and carries no signature, so without this nothing ever proves the private key can sign;
+        // a key that cannot would leave the server holding a credential no assertion can satisfy.
+        // The probe bytes are thrown away and never leave this method.
+        if (runCatching { WebAuthnEngine.signAssertion(authenticated, ENROLMENT_PROBE, ENROLMENT_PROBE) }.isFailure) {
+            SignOnPasskeyKey.delete(generated.alias)
+            return finishWithFailure("The new KySignOn passkey could not sign; enrolment cancelled")
+        }
+
+        val userObj = json.optJSONObject("user")
+        val fallbackUsername = userObj?.optString("name")?.ifBlank { null }
+            ?: userObj?.optString("displayName")?.ifBlank { null }
+            ?: intent.getStringExtra(EXTRA_USERNAME).orEmpty()
+        val username = if (::usernameInput.isInitialized) {
+            usernameInput.text.toString().trim()
+        } else {
+            fallbackUsername
+        }
+
+        val userHandleStr = userObj?.optString("id")
+        val userHandle = if (!userHandleStr.isNullOrBlank()) {
+            runCatching { Base64.decode(userHandleStr, B64_FLAGS) }
+                .getOrDefault(userHandleStr.toByteArray(StandardCharsets.UTF_8))
+        } else {
+            ByteArray(0)
+        }
+
+        val credentialId = WebAuthnEngine.generateCredentialId()
+        val authData = WebAuthnEngine.buildRegistrationAuthData(
+            rpId = rpId,
+            signCount = 0,
+            credentialId = credentialId,
+            cosePublicKey = WebAuthnEngine.encodeCosePublicKey(generated.publicKey),
+        )
+        val attestationObject = WebAuthnEngine.buildAttestationObject(authData)
+
+        store.save(
+            SignOnPasskeyRecord(
+                rpId = rpId,
+                username = username,
+                userHandle = userHandle,
+                credentialId = credentialId,
+                signCount = 0,
+                alias = generated.alias,
+                strongBoxBacked = generated.strongBoxBacked,
+            ),
+        )
+        // Only now is the previous key redundant.
+        live?.alias?.takeIf { it != generated.alias }?.let(SignOnPasskeyKey::delete)
+
+        val responseJson = JSONObject().apply {
+            put("id", b64(credentialId))
+            put("rawId", b64(credentialId))
+            put("type", "public-key")
+            put(
+                "response",
+                JSONObject().apply {
+                    put("attestationObject", b64(attestationObject))
+                    if (clientDataJson != null) put("clientDataJSON", b64(clientDataJson))
+                },
+            )
+        }
+
+        val data = Bundle().apply {
+            putString("androidx.credentials.BUNDLE_KEY_REGISTRATION_RESPONSE_JSON", responseJson.toString())
+        }
+        setResult(
+            Activity.RESULT_OK,
+            Intent().putExtra(
+                CredentialProviderService.EXTRA_CREATE_CREDENTIAL_RESPONSE,
+                CreateCredentialResponse(data),
+            ),
+        )
+        finish()
     }
 
     /**
@@ -370,6 +640,15 @@ class CredentialAuthActivity : AppCompatActivity() {
             ?: return failed("Request has no relying party")
         if (RpId.normalize(json.optJSONObject("rp")?.optString("id")) != rpId) {
             return failed("Relying party does not match the request")
+        }
+        // The vault create path must never mint for the paired KySignOn host, by the lenient test:
+        // passwords_vault.kdbx syncs to KyPasswords and holds an exportable private key. The
+        // service already routes an exact match to hardware, so this catches both a "www."
+        // mismatch between the pairing URL and the request, and any re-entry of this Activity
+        // straight into the vault path. A pairing read that threw cannot rule it out either.
+        val paired = runCatching { PairingStore(this).account()?.serverUrl }
+        if (paired.isFailure || suppressesVaultPasskeys(rpId, paired.getOrNull())) {
+            return failed("A KySignOn passkey must be created in secure hardware, not the vault")
         }
 
         val challenge = json.optString("challenge").takeIf { it.isNotBlank() }
@@ -514,6 +793,7 @@ class CredentialAuthActivity : AppCompatActivity() {
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, B64_FLAGS)
 
     private fun finishWithFailure(message: String) {
+        enrolling = false
         val result = Intent().apply {
             putExtra(CredentialProviderService.EXTRA_GET_CREDENTIAL_EXCEPTION, GetCredentialException("android.credentials.GetCredentialException.TYPE_UNKNOWN", message))
             putExtra(CredentialProviderService.EXTRA_CREATE_CREDENTIAL_EXCEPTION, CreateCredentialException("android.credentials.CreateCredentialException.TYPE_UNKNOWN", message))
@@ -523,6 +803,9 @@ class CredentialAuthActivity : AppCompatActivity() {
     }
 
     private fun finishWithCancellation() {
+        // Every terminal exit clears the guard; a successful enrolment deliberately does not, so a
+        // late tap cannot start a second one against a record that is already the server's.
+        enrolling = false
         val result = Intent().apply {
             putExtra(CredentialProviderService.EXTRA_GET_CREDENTIAL_EXCEPTION, GetCredentialException("android.credentials.GetCredentialException.TYPE_USER_CANCELED", "User cancelled authentication"))
             putExtra(CredentialProviderService.EXTRA_CREATE_CREDENTIAL_EXCEPTION, CreateCredentialException("android.credentials.CreateCredentialException.TYPE_USER_CANCELED", "User cancelled creation"))
@@ -536,6 +819,8 @@ class CredentialAuthActivity : AppCompatActivity() {
         const val ACTION_GET_PASSWORD = "org.kysecurity.authenticator.action.GET_PASSWORD"
         const val ACTION_CREATE_PASSKEY = "org.kysecurity.authenticator.action.CREATE_PASSKEY"
         const val ACTION_CREATE_PASSWORD = "org.kysecurity.authenticator.action.CREATE_PASSWORD"
+        const val ACTION_CREATE_SIGNON_PASSKEY = "org.kysecurity.authenticator.action.CREATE_SIGNON_PASSKEY"
+        const val ACTION_GET_SIGNON_PASSKEY = "org.kysecurity.authenticator.action.GET_SIGNON_PASSKEY"
 
         const val EXTRA_ACTION = "extra_action"
         const val EXTRA_ENTRY_ID = "extra_entry_id"
@@ -551,6 +836,9 @@ class CredentialAuthActivity : AppCompatActivity() {
         const val EXTRA_CLIENT_DATA_HASH = "extra_client_data_hash"
 
         private const val B64_FLAGS = Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+
+        /** Throwaway bytes signed once at enrolment to prove the key works. Never sent anywhere. */
+        private val ENROLMENT_PROBE = "kyauth-signon-enrolment-probe".toByteArray(StandardCharsets.UTF_8)
 
         const val TYPE_PUBLIC_KEY_CREDENTIAL = "android.credentials.TYPE_PUBLIC_KEY_CREDENTIAL"
         const val TYPE_PASSWORD_CREDENTIAL = "android.credentials.TYPE_PASSWORD_CREDENTIAL"

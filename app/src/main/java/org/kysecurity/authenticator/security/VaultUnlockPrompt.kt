@@ -4,10 +4,11 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import java.security.Signature
 import javax.crypto.Cipher
 
 /**
- * The single way to obtain an authenticated cipher for the vault keys.
+ * Biometric and device-credential prompts. [show] yields a cipher bound to [VaultKek] for the vault keys; [showForSignature] yields an authenticated Keystore signature and touches no vault material.
  *
  * The cipher is bound to [VaultKek], so it cannot decrypt anything until the framework reports a
  * successful biometric or device-credential authentication. Callers receive null only on a device
@@ -54,6 +55,50 @@ object VaultUnlockPrompt {
             .build()
 
         prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+    }
+
+    /**
+     * Authenticates a Keystore [Signature] for one use. Unlike [show] this touches no vault key at
+     * all: the KySignOn passkey path must keep working while the password vault is locked or
+     * compromised, so it must never reach [VaultKek].
+     */
+    fun showForSignature(
+        activity: FragmentActivity,
+        subtitle: String,
+        signature: Signature,
+        onAuthenticated: (Signature) -> Unit,
+        onFailed: (String) -> Unit,
+    ) {
+        val prompt = BiometricPrompt(
+            activity,
+            ContextCompat.getMainExecutor(activity),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    // No fallback to the unauthenticated `signature`: handing that back would be a
+                    // Signature the framework never bound to this authentication. On the assertion
+                    // path it would fail at sign(), but on the enrolment path nothing forces a
+                    // signature, so the substitution would pass silently.
+                    val authenticated = result.cryptoObject?.signature
+                    if (authenticated == null) {
+                        onFailed("Authentication did not return a usable signing key.")
+                        return
+                    }
+                    onAuthenticated(authenticated)
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    onFailed(errString.toString())
+                }
+            },
+        )
+
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("KyAuth")
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(AUTHENTICATORS)
+            .build()
+
+        prompt.authenticate(info, BiometricPrompt.CryptoObject(signature))
     }
 
     fun canAuthenticate(activity: FragmentActivity): Boolean =

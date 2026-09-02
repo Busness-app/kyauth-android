@@ -10,6 +10,7 @@ import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
 import javax.crypto.Cipher
+import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.parcelable
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.KyAuthAutofillService
@@ -51,7 +52,17 @@ class CredentialUnlockActivity : AppCompatActivity() {
                 val entries = runCatching {
                     KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
                 }.getOrNull() ?: return@useVaultKeys null
-                CredentialEntryBuilder.build(this, request, entries)
+                // signOnPasskey is null: the service already surfaced it alongside the
+                // authentication action, and offering it again here would duplicate it.
+                CredentialEntryBuilder.build(
+                    context = this,
+                    request = request,
+                    entries = entries,
+                    signOnPasskey = null,
+                    // EncryptedSharedPreferences can throw; this is a background Thread so a
+                    // crash here would silently kill enumeration rather than fail closed.
+                    signOnServerUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull(),
+                )
             }
             runOnUiThread {
                 if (response == null) {
