@@ -59,7 +59,9 @@ class CredentialUnlockActivity : AppCompatActivity() {
                     request = request,
                     entries = entries,
                     signOnPasskey = null,
-                    signOnServerUrl = PairingStore(this).account()?.serverUrl,
+                    // EncryptedSharedPreferences can throw; this is a background Thread so a
+                    // crash here would silently kill enumeration rather than fail closed.
+                    signOnServerUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull(),
                 )
             }
             runOnUiThread {

@@ -48,13 +48,25 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
     }
 
     private fun buildGetResponse(request: BeginGetCredentialRequest): BeginGetCredentialResponse {
-        val signOnPasskey = SignOnPasskeyStore(this).record()
-        val serverUrl = PairingStore(this).account()?.serverUrl
+        // EncryptedSharedPreferences can throw (GeneralSecurityException/IOException, e.g. after a
+        // device restore or Keystore keyset invalidation); this runs before the vault check below,
+        // so it must fail closed the same way rather than crashing the process.
+        val signOnPasskey = runCatching { SignOnPasskeyStore(this).record() }.getOrNull()
+        val serverUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
         val vaultKey = AppLockManager.getPasswordVaultKey()
         val entries = vaultKey?.let {
             runCatching {
                 KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), it)
             }.getOrNull()
+        }
+        // Nothing local to offer and no vault: short-circuit before the builder runs. The builder
+        // can trigger a DigitalAssetLinks HTTPS fetch to a caller-named host, and a locked device
+        // with no enrolled KySignOn passkey must not let an arbitrary native app cause that with no
+        // user interaction.
+        if (signOnPasskey == null && entries == null) {
+            return BeginGetCredentialResponse.Builder()
+                .addAuthenticationAction(unlockAction())
+                .build()
         }
         // While the vault is unavailable the KySignOn passkey is still offered: it needs no vault
         // key, and routing it through "Unlock KyAuth" would make KySignOn MFA depend on the

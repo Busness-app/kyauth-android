@@ -14,10 +14,12 @@ import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.PasswordEntry
 
 /**
- * Turns a credential query plus an unlocked vault into the entries offered to the user.
+ * Turns a credential query into the entries offered to the user.
  *
- * Shared by [KyAuthCredentialProviderService] (which only reaches it while unlocked) and
- * [CredentialUnlockActivity] (which reaches it behind an authentication action).
+ * The hardware-backed KySignOn passkey needs no vault key, so [KyAuthCredentialProviderService]
+ * reaches this even while locked; the password-vault entries are added only when a vault is
+ * supplied. [CredentialUnlockActivity] reaches this after authenticating, to add the vault
+ * entries the service could not.
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 object CredentialEntryBuilder {
@@ -115,33 +117,42 @@ object CredentialEntryBuilder {
             )
         }
 
-        for (entry in entries.filter { DomainMatcher.matchesPasskey(it, rpId) }) {
-            val passkey = entry.passkey ?: continue
-            // A KySignOn passkey in the synced vault is not offered: it must be re-enrolled into
-            // secure hardware. The Passwords tab badges it so the user knows why.
-            if (SignOnPasskey.isSignOnRpId(passkey.rpId, signOnServerUrl)) continue
-            val title = passkey.username.ifBlank { entry.title }
-            val intent = Intent(context, CredentialAuthActivity::class.java).apply {
-                putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSKEY)
-                putExtra(CredentialAuthActivity.EXTRA_ENTRY_ID, entry.id)
-                putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
-                putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
-                putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
-                putExtra(CredentialAuthActivity.EXTRA_CALLER_PACKAGE, callerPackage)
-                putExtra(CredentialAuthActivity.EXTRA_CLIENT_DATA_HASH, clientDataHash)
-                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, "Sign in with Passkey")
-                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_SUBTITLE, "$title (Passkey • $rpId)")
+        // A KySignOn passkey in the synced vault is never offered: it must be re-enrolled into
+        // secure hardware. Tested against the validated request rpId, not the stored passkey's
+        // rpId, because DomainMatcher.matchesPasskey below is lenient about a leading "www." while
+        // isSignOnRpId is exact — testing the stored value would let www.<host> slip through.
+        val isSignOnRequest = SignOnPasskey.isSignOnRpId(rpId, signOnServerUrl)
+        if (!isSignOnRequest) {
+            val matches = entries.filter { DomainMatcher.matchesPasskey(it, rpId) }
+            for ((index, entry) in matches.withIndex()) {
+                val passkey = entry.passkey ?: continue
+                val title = passkey.username.ifBlank { entry.title }
+                val intent = Intent(context, CredentialAuthActivity::class.java).apply {
+                    putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSKEY)
+                    putExtra(CredentialAuthActivity.EXTRA_ENTRY_ID, entry.id)
+                    putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
+                    putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
+                    putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
+                    putExtra(CredentialAuthActivity.EXTRA_CALLER_PACKAGE, callerPackage)
+                    putExtra(CredentialAuthActivity.EXTRA_CLIENT_DATA_HASH, clientDataHash)
+                    putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, "Sign in with Passkey")
+                    putExtra(CredentialAuthActivity.EXTRA_DISPLAY_SUBTITLE, "$title (Passkey • $rpId)")
+                }
+                responseBuilder.addCredentialEntry(
+                    CredentialSliceHelper.createGetCredentialEntry(
+                        context = context,
+                        option = option,
+                        title = title,
+                        subtitle = "Passkey • $rpId",
+                        fillIntent = intent,
+                        // PendingIntent identity is requestCode + Intent.filterEquals; extras are not
+                        // part of that identity and both intents target the same Activity. Without a
+                        // distinct code per entry, FLAG_UPDATE_CURRENT collapses every row here onto
+                        // one PendingIntent, so all of them would fire the last entry's extras.
+                        requestCode = requestCode * 1000 + index,
+                    ),
+                )
             }
-            responseBuilder.addCredentialEntry(
-                CredentialSliceHelper.createGetCredentialEntry(
-                    context = context,
-                    option = option,
-                    title = title,
-                    subtitle = "Passkey • $rpId",
-                    fillIntent = intent,
-                    requestCode = requestCode,
-                ),
-            )
         }
     }
 
