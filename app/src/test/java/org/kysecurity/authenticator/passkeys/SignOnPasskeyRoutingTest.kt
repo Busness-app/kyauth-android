@@ -34,4 +34,19 @@ class SignOnPasskeyRoutingTest {
     fun `an unpaired device routes nothing to the local store`() {
         assertFalse(SignOnPasskey.isSignOnRpId("signon.example.com", null))
     }
+
+    @Test
+    fun `keeps a www host instead of widening to its parent`() {
+        // DomainMatcher.normalizeHost would strip "www." here; that would let any sibling
+        // subdomain authorized for the parent route itself into the device-local store.
+        assertEquals("www.signon.example.com", SignOnPasskey.signOnRpId("https://www.signon.example.com"))
+    }
+
+    @Test
+    fun `a www pairing url does not match its parent domain`() {
+        val server = "https://www.signon.example.com"
+        assertTrue(SignOnPasskey.isSignOnRpId("www.signon.example.com", server))
+        assertFalse(SignOnPasskey.isSignOnRpId("signon.example.com", server))
+        assertFalse(SignOnPasskey.isSignOnRpId("blog.signon.example.com", server))
+    }
 }

@@ -1,8 +1,8 @@
 package org.kysecurity.authenticator.passkeys
 
+import java.net.URI
 import java.util.Base64
 import org.json.JSONObject
-import org.kysecurity.authenticator.passwords.DomainMatcher
 
 /**
  * Decides whether a relying party is the paired KySignOn server.
@@ -16,9 +16,18 @@ import org.kysecurity.authenticator.passwords.DomainMatcher
  */
 object SignOnPasskey {
 
-    /** The RP ID of the paired KySignOn server, or null when unpaired or unusable as an RP ID. */
-    fun signOnRpId(serverUrl: String?): String? =
-        RpId.normalize(DomainMatcher.extractDomain(serverUrl))
+    /** The RP ID of the paired KySignOn server, or null when unpaired or unusable as an RP ID.
+     *
+     * Deliberately does not use DomainMatcher.extractDomain: that helper strips a leading "www."
+     * for autofill leniency, which would silently widen this match to the parent domain.
+     */
+    fun signOnRpId(serverUrl: String?): String? {
+        if (serverUrl.isNullOrBlank()) return null
+        val trimmed = serverUrl.trim()
+        val withScheme = if (trimmed.contains("://")) trimmed else "https://$trimmed"
+        val host = runCatching { URI(withScheme).host }.getOrNull() ?: return null
+        return RpId.normalize(host)
+    }
 
     /** Exact match only; a passkey for `example.com` is not a passkey for `login.example.com`. */
     fun isSignOnRpId(rpId: String?, serverUrl: String?): Boolean {
