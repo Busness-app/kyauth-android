@@ -5,24 +5,18 @@ import org.bouncycastle.crypto.params.Argon2Parameters
 import org.json.JSONObject
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Implements Argon2id and PBKDF2-HMAC-SHA256 key wrapping with AES-GCM, compatible with
- * KyPasswords Server.
+ * Implements Argon2id key wrapping with AES-GCM, compatible with KyPasswords Server.
  *
- * The envelope's `kdf` field selects the derivation. **Its absence is the definition of
- * PBKDF2-HMAC-SHA256** — that is how existing envelopes are marked, so it is never inferred from
- * the other fields. Every Argon2id cost parameter is read from the envelope rather than assumed,
- * because a server may legitimately have written different ones.
+ * `kdf` must say `argon2id`; anything else, including its absence, is an envelope this app cannot
+ * identify and refuses rather than guesses at. Every cost parameter is read from the envelope
+ * rather than assumed, because a server may legitimately have written different ones.
  */
 object KyPasswordEnvelopeCrypto {
     private const val KDF_ARGON2ID = "argon2id"
-
-    private const val DEFAULT_ITERATIONS = 600_000
 
     /** OWASP baseline, matching what the KyPasswords web client writes. */
     private const val ARGON2ID_MEMORY_KIB = 65_536
@@ -40,14 +34,6 @@ object KyPasswordEnvelopeCrypto {
     private const val MAX_ARGON2_ITERATIONS = 16
     private const val MAX_PARALLELISM = 4
 
-    /**
-     * A paired server supplies the iteration count, so it also decides how much work unwrapping
-     * costs. Without a ceiling a hostile server pins a core for minutes on every unlock. There is
-     * deliberately no floor: a low count only produces a wrong key (the GCM tag then fails), and
-     * rejecting it would lock users out of envelopes a server legitimately wrote with fewer
-     * rounds.
-     */
-    private const val MAX_ITERATIONS = 5_000_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
 
@@ -57,28 +43,13 @@ object KyPasswordEnvelopeCrypto {
         val iv = hexToBytes(json.getString("iv"))
         val ciphertext = hexToBytes(json.getString("ciphertext"))
 
-        val derivedKey = when {
-            !json.has("kdf") -> derivePbkdf2(secret, salt, envelopeIterations(json))
-            json.getString("kdf") == KDF_ARGON2ID -> deriveArgon2id(secret, salt, json)
-            // Falling through to PBKDF2 would derive a wrong key from an envelope we do not
-            // understand, instead of saying we cannot open it.
-            else -> throw IllegalArgumentException("Unsupported envelope KDF: ${json.getString("kdf")}")
-        }
+        // An envelope we cannot identify is one we refuse, not one we guess at.
+        require(json.optString("kdf") == KDF_ARGON2ID) { "Unsupported envelope KDF: ${json.optString("kdf")}" }
+        val derivedKey = deriveArgon2id(secret, salt, json)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(derivedKey, "AES"), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
         return cipher.doFinal(ciphertext)
-    }
-
-    private fun envelopeIterations(json: JSONObject): Int {
-        val iterations = if (json.has("iterations")) json.getInt("iterations") else DEFAULT_ITERATIONS
-        require(iterations in 1..MAX_ITERATIONS) { "Envelope iteration count is out of range" }
-        return iterations
-    }
-
-    private fun derivePbkdf2(secret: String, salt: ByteArray, iterations: Int): ByteArray {
-        val spec = PBEKeySpec(secret.toCharArray(), salt, iterations, KEY_LENGTH_BITS)
-        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
     }
 
     private fun deriveArgon2id(secret: String, salt: ByteArray, json: JSONObject): ByteArray {
@@ -121,7 +92,6 @@ object KyPasswordEnvelopeCrypto {
         return value
     }
 
-    /** Writes the Argon2id shape. Envelopes KyAuth wrote earlier stay readable; see [unwrapVaultKey]. */
     fun wrapVaultKey(vaultKey: ByteArray, secret: String): String {
         val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }
         val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
