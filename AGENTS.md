@@ -35,9 +35,12 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - Passkeys use native ES256 / P-256 WebAuthn cryptography with COSE public key encoding and ECDSA assertion signing.
 - KyAuth acts as an Android 14+ (API 34+) system Credential Provider for both Passkeys and Passwords via `KyAuthCredentialProviderService` (with `CredentialAuthActivity`) and an Android 12+ (API 31+) system Autofill Service via `KyAuthAutofillService`.
 - While locked, neither provider touches vault material. Autofill returns a `FillResponse` with an
-  authentication `IntentSender` (`AutofillUnlockActivity`); the Credential Provider returns an
-  authentication `Action` (`CredentialUnlockActivity`). Both unwrap the keys for one operation via
-  `AppLockManager.useVaultKeys` and erase them again, so a background request never unlocks the app.
+  authentication `IntentSender` (`AutofillUnlockActivity`). The Credential Provider returns an
+  authentication `Action` (`CredentialUnlockActivity`) for anything vault-backed, and, when a
+  KySignOn passkey is enrolled, a real credential entry for it directly alongside that action — the
+  passkey entry needs no vault key, which is why it can be offered while locked. The vault-backed
+  paths unwrap the keys for one operation via `AppLockManager.useVaultKeys` and erase them again, so
+  a background request never unlocks the app.
 - Passkey RP IDs are validated by `RpId`: syntactically valid, not a public suffix, and for browser
   callers equal to or a registrable parent of the caller's web origin. Native-app callers are bound
   to the RP by `DigitalAssetLinks`, which fetches `https://<rpId>/.well-known/assetlinks.json` and
@@ -133,12 +136,11 @@ Recorded so it is not mistaken for done:
   them. This was decided by reading AOSP, not by observation. Verify on a device: with KyAuth locked,
   trigger a KySignOn sign-in, tap "Unlock KyAuth", and confirm the KySignOn passkey is still offered.
   If it disappears, pass the record through in `CredentialUnlockActivity` instead of null.
-- **Biometric prompt flows are unverified.** The per-use `BiometricPrompt` for the KySignOn passkey
-  (enrolment and assertion, via `VaultUnlockPrompt.showForSignature`) cannot be driven from an
-  automated test in this project and needs manual device verification.
 - **Device verification.** Emulator tests cover secure-lock-backed `VaultKek` creation and backup
-  flags. Full biometric prompts, `useVaultKeys`, and provider unlock flows still require manual
-  device verification.
+  flags. Full biometric prompts, `useVaultKeys`, provider unlock flows, and the per-use
+  `BiometricPrompt` for the KySignOn passkey (enrolment and assertion, via
+  `VaultUnlockPrompt.showForSignature`) still require manual device verification; none of these can
+  be driven from an automated test in this project.
 - **Deprecated platform APIs.** `Slice`, `EncryptedSharedPreferences`/`MasterKey`, and the
   `Dataset`/`FillResponse` builders are deprecated. Moving to `androidx.credentials` would remove
   most of the Slice usage.
