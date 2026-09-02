@@ -17,7 +17,6 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import org.kysecurity.authenticator.security.writeAtomically
-import org.kysecurity.authenticator.urlOrLegacy
 
 /**
  * All access is serialized on this object: the UI, Autofill, the Credential Provider and vault
@@ -52,7 +51,7 @@ object KdbxPasswordVault {
                             title = title,
                             username = entry.fields[BasicField.UserName.key]?.content.orEmpty(),
                             password = password,
-                            url = entry.fields.urlOrLegacy(),
+                            url = entry.fields.url?.content?.ifBlank { null },
                             notes = entry.fields[BasicField.Notes.key]?.content?.ifBlank { null },
                             passkey = passkey,
                             id = entry.uuid.toString(),

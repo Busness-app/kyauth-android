@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the envelope fixtures pinned in KyPasswordEnvelopeCryptoTest.
+"""Regenerate the Argon2id envelope fixture pinned in KyPasswordEnvelopeCryptoTest.
 
 Derives with reference libargon2 (argon2-cffi) and encrypts with pyca/cryptography, so the
 fixture is produced by implementations independent of KyAuth's. A fixture KyAuth generated
@@ -38,26 +38,3 @@ print(json.dumps({
     "parallelism": PARALLELISM,
 }))
 
-# The legacy (no "kdf" key) PBKDF2-HMAC-SHA256 shape, pinned so the compatibility test survives
-# the write path moving to Argon2id.
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-LEGACY_PASSWORD = b"legacy-secret"
-LEGACY_SALT = bytes.fromhex("00112233445566778899aabbccddeeff")
-LEGACY_IV = bytes.fromhex("0b0a090807060504030201ff")
-LEGACY_VAULT_KEY = bytes((i * 5 + 1) & 0xFF for i in range(32))
-LEGACY_ITERATIONS = 600_000
-
-legacy_key = PBKDF2HMAC(
-    algorithm=hashes.SHA256(), length=32, salt=LEGACY_SALT, iterations=LEGACY_ITERATIONS,
-).derive(LEGACY_PASSWORD)
-
-print()
-print("legacy vault key:", binascii.hexlify(LEGACY_VAULT_KEY).decode())
-print(json.dumps({
-    "salt": LEGACY_SALT.hex(),
-    "iv": LEGACY_IV.hex(),
-    "ciphertext": AESGCM(legacy_key).encrypt(LEGACY_IV, LEGACY_VAULT_KEY, None).hex(),
-    "iterations": LEGACY_ITERATIONS,
-}))

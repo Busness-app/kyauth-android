@@ -88,14 +88,6 @@ class KyPasswordEnvelopeCryptoTest {
 
     private val referenceArgon2idVaultKey = ByteArray(32) { it.toByte() }
 
-    /** PBKDF2-HMAC-SHA256, 600k rounds, same generator script. Wraps ByteArray(32) { it * 5 + 1 }. */
-    private val referencePbkdf2Envelope = """
-        {"salt":"00112233445566778899aabbccddeeff",
-         "iv":"0b0a090807060504030201ff",
-         "ciphertext":"90c66f242532e23434f3604f96c2ec1dd4f1cb822e22d137ed4ce3163700a6325bd03ae884e55a2f5fba2c8b2f63fd34",
-         "iterations":600000}
-    """.trimIndent()
-
     @Test
     fun unwrapsArgon2idEnvelopeFromReferenceImplementation() {
         val vaultKey = KyPasswordEnvelopeCrypto.unwrapVaultKey(
@@ -108,8 +100,8 @@ class KyPasswordEnvelopeCryptoTest {
 
     @Test
     fun rejectsUnknownKdf() {
-        // Falling through to PBKDF2 on an unrecognised KDF would derive a wrong key from an
-        // envelope we do not understand, instead of saying so.
+        // Guessing at an unrecognised KDF would derive a wrong key from an envelope we do not
+        // understand, instead of saying so.
         val envelope = org.json.JSONObject(referenceArgon2idEnvelope)
             .put("kdf", "scrypt")
             .toString()
@@ -144,30 +136,27 @@ class KyPasswordEnvelopeCryptoTest {
     }
 
     @Test
-    fun unwrapsLegacyEnvelopeWithoutKdfField() {
-        // Absence of "kdf" is the definition of PBKDF2-HMAC-SHA256. Envelopes already on servers
-        // must keep opening after Argon2id lands — so this pins a fixture rather than round-tripping
-        // through wrapVaultKey, which stops writing this shape once the write path moves.
-        val vaultKey = ByteArray(32) { (it * 5 + 1).toByte() }
+    fun rejectsEnvelopeWithoutKdf() {
+        // PBKDF2 marked itself by omitting the field. Nothing wrote such an envelope that still
+        // exists, so an envelope arriving without a KDF is one we cannot identify, not a legacy one.
+        val envelope = org.json.JSONObject(referenceArgon2idEnvelope)
+            .apply { remove("kdf") }
+            .toString()
 
-        assertArrayEquals(
-            vaultKey,
-            KyPasswordEnvelopeCrypto.unwrapVaultKey(referencePbkdf2Envelope, "legacy-secret"),
-        )
+        assertThrows(IllegalArgumentException::class.java) {
+            KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, referenceArgon2idSecret)
+        }
     }
 
     @Test
     fun rejectsAbsurdIterationCount() {
         // A hostile server dictating the KDF cost would pin a core for minutes on every unlock.
-        val envelope = org.json.JSONObject()
-            .put("salt", "00112233445566778899aabbccddeeff")
-            .put("iv", "000102030405060708090a0b")
-            .put("ciphertext", "00112233445566778899aabbccddeeff")
+        val envelope = org.json.JSONObject(referenceArgon2idEnvelope)
             .put("iterations", Int.MAX_VALUE)
             .toString()
 
         assertThrows(IllegalArgumentException::class.java) {
-            KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, "secret")
+            KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, referenceArgon2idSecret)
         }
     }
 }
