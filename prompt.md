@@ -19,7 +19,8 @@ KyAuth is an on-device authenticator for the KySecurity suite.
 - TOTP entries use a dedicated KDBX vault.
 - Passwords use a separate KDBX vault and a separate vault key.
 - Password reveal and copy require a fresh biometric or device-authentication prompt.
-- KyPasswords sync is a later feature. It must not sync TOTP data.
+- KyPasswords sync is a later feature. It must not sync TOTP data, and it must not sync the KySignOn
+  login passkey, whose key is hardware-resident and device-local by design.
 - Password sync must not send plaintext passwords or vault keys to KyPasswords.
 - Release builds require HTTPS. Debug builds allow loopback HTTP only.
 - The pairing registration endpoint must share the pairing server origin.

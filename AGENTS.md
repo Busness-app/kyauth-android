@@ -25,6 +25,13 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - Push MFA receives KySignOn FCM data-message challenges, posts a local notification, and opens the Push MFA tab for approve/deny. A response is only ever sent to the paired server; a `serverUrl` in the push payload is ignored. Digits must be two-digit, decoys are capped at 3, and expiry is clamped to 10 minutes.
 - An MFA response must carry an explicit decision. A 2xx with no `approved`/`success` field is a protocol error, not an approval.
 - Passwords and Passkeys use `passwords_vault.kdbx`. The app can generate an independent random local vault key for device-only storage. Pairing with an empty KyPasswords account uploads that local vault with a client-created password envelope; pairing never replaces an existing server vault that uses another key.
+- A passkey whose RP ID is the paired KySignOn server's host is the exception: its private key is
+  generated in AndroidKeyStore (StrongBox where available, TEE otherwise), is non-exportable, and
+  never enters a KDBX vault or any synced artifact. Only its metadata is stored, in
+  `SignOnPasskeyStore`. The assertion path never calls `AppLockManager.useVaultKeys`, so KySignOn
+  MFA keeps working while the password vault is locked, compromised, or in recovery. The Credential
+  Provider therefore offers this one entry while KyAuth is locked, alongside the unlock action.
+  Losing the device means falling back to KySignOn recovery codes or an admin MFA reset.
 - Passkeys use native ES256 / P-256 WebAuthn cryptography with COSE public key encoding and ECDSA assertion signing.
 - KyAuth acts as an Android 14+ (API 34+) system Credential Provider for both Passkeys and Passwords via `KyAuthCredentialProviderService` (with `CredentialAuthActivity`) and an Android 12+ (API 31+) system Autofill Service via `KyAuthAutofillService`.
 - While locked, neither provider touches vault material. Autofill returns a `FillResponse` with an
@@ -69,7 +76,9 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - `security/`: lock state, PIN policy, `VaultKek` authentication-bound key wrapping, `VaultUnlockPrompt`, atomic file writes, and local wipe.
 - `totp/`: TOTP parsing, generation, and KDBX persistence.
 - `passwords/`: password/passkey entry models, domain matcher, password generator, autofill service, and KDBX persistence.
-- `passkeys/`: FIDO2 WebAuthn crypto engine, `ClientData` (CollectedClientData), `RpId` validation, CredentialProviderService, entry builder, slice builder, unlock activity, and auth activity.
+- `passkeys/`: FIDO2 WebAuthn crypto engine, `ClientData` (CollectedClientData), `RpId` validation,
+  `SignOnPasskey` routing plus its hardware key and metadata store, CredentialProviderService, entry
+  builder, slice builder, unlock activity, and auth activity.
 - `ThemeManager.kt`: the shared 15-theme palette and local theme preference.
 - `UiComponents.kt`: reusable programmatic view styling and controls.
 - `AboutDialog.kt`: MIT About dialog.
@@ -103,9 +112,30 @@ Recorded so it is not mistaken for done:
 - **Push MFA payload binding.** `MfaMessage.formatPayload` still signs only
   `prefix|challengeId|verb|digits`. Binding server origin, account, purpose and expiry needs a
   matching KySignOn server change.
-- **Passkey private keys are exportable.** Deliberate: they live in the KDBX vault so they sync and
-  restore, as other password managers do. Protection comes from the authentication-bound vault key.
-  Non-exportable Keystore keys would make passkeys device-only.
+- **Non-KySignOn passkey private keys are exportable.** Deliberate: they live in the KDBX vault so
+  they sync and restore, as other password managers do. Protection comes from the
+  authentication-bound vault key. The KySignOn login passkey is the exception and is
+  hardware-resident; see the product contract above.
+- **KySignOn passkey attestation.** Even when the key is hardware-backed, `fmt` is still `none`, so
+  the server has only the client's word for it. `setAttestationChallenge` plus a verifier in
+  `kysignon-server` would make it evidence.
+- **KySignOn passkey hardware backing is unverified.** `SignOnPasskeyKey.generate` refuses any key
+  whose `KeyInfo.securityLevel` is `SECURITY_LEVEL_SOFTWARE`, and that fail-closed path is covered
+  by a passing instrumented test. The positive path is not: every available Android emulator ships
+  the software KeyMint reference implementation, so `generate` returning a hardware-backed key has
+  never been observed succeeding. Four instrumented tests in `SignOnPasskeyKeyTest` are gated behind
+  a JUnit assumption and SKIP rather than pass. Running them on a physical device is what closes
+  this; until then, do not claim the key is hardware-resident.
+- **Credential picker accumulation is unverified.** While locked, the provider returns the KySignOn
+  entry alongside the unlock action, and `CredentialUnlockActivity` deliberately passes
+  `signOnPasskey = null` so the entry is not duplicated after unlocking. That is correct only if the
+  framework ADDS an authentication action's entries to those already shown rather than replacing
+  them. This was decided by reading AOSP, not by observation. Verify on a device: with KyAuth locked,
+  trigger a KySignOn sign-in, tap "Unlock KyAuth", and confirm the KySignOn passkey is still offered.
+  If it disappears, pass the record through in `CredentialUnlockActivity` instead of null.
+- **Biometric prompt flows are unverified.** The per-use `BiometricPrompt` for the KySignOn passkey
+  (enrolment and assertion, via `VaultUnlockPrompt.showForSignature`) cannot be driven from an
+  automated test in this project and needs manual device verification.
 - **Device verification.** Emulator tests cover secure-lock-backed `VaultKek` creation and backup
   flags. Full biometric prompts, `useVaultKeys`, and provider unlock flows still require manual
   device verification.
