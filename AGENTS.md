@@ -30,6 +30,9 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   is refused rather than falling through to PBKDF2, which would derive a wrong key from an
   envelope the app does not understand. Argon2id costs are server-supplied, so they are range-
   checked before anything is allocated (256 MiB ceiling) and rejected, not clamped.
+  KyAuth writes `argon2id` at the same OWASP baseline the web client uses (64 MiB, t=3, p=1).
+  An older KyAuth build cannot read what a current one writes, so read support must reach the
+  fleet before the write path does.
 - Passwords and Passkeys use `passwords_vault.kdbx`. The app can generate an independent random local vault key for device-only storage. Pairing with an empty KyPasswords account uploads that local vault with a client-created password envelope; pairing never replaces an existing server vault that uses another key.
 - A passkey whose RP ID is the paired KySignOn server's host is the exception: its private key is
   generated in AndroidKeyStore (StrongBox where available, TEE otherwise), is non-exportable, and

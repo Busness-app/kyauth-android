@@ -10,13 +10,14 @@ class KyPasswordEnvelopeCryptoTest {
 
     @Test
     fun wrapsAndUnwrapsVaultKey() {
+        // Unwrapping reads the costs back out of the JSON rather than reusing the constants
+        // wrapping derived with, so an envelope declaring a cost it did not use fails here.
         val vaultKey = ByteArray(32) { (it * 3 + 7).toByte() }
         val masterPassword = "correct-horse-battery-staple"
 
         val envelopeJson = KyPasswordEnvelopeCrypto.wrapVaultKey(
             vaultKey = vaultKey,
             secret = masterPassword,
-            iterations = 10_000,
         )
 
         assertNotNull(envelopeJson)
@@ -35,10 +36,24 @@ class KyPasswordEnvelopeCryptoTest {
         val envelopeJson = KyPasswordEnvelopeCrypto.wrapVaultKey(
             vaultKey = vaultKey,
             secret = "password123",
-            iterations = 5_000,
         )
 
         KyPasswordEnvelopeCrypto.unwrapVaultKey(envelopeJson, "wrongpassword")
+    }
+
+    @Test
+    fun wrapVaultKeyWritesArgon2idEnvelope() {
+        val envelope = org.json.JSONObject(
+            KyPasswordEnvelopeCrypto.wrapVaultKey(ByteArray(32) { it.toByte() }, "a-master-password"),
+        )
+
+        // The shape KyPasswords reads, at the OWASP baseline costs its web client writes.
+        assertEquals("argon2id", envelope.getString("kdf"))
+        assertEquals(65536, envelope.getInt("memoryKiB"))
+        assertEquals(3, envelope.getInt("iterations"))
+        assertEquals(1, envelope.getInt("parallelism"))
+        assertEquals(16, KyPasswordEnvelopeCrypto.hexToBytes(envelope.getString("salt")).size)
+        assertEquals(12, KyPasswordEnvelopeCrypto.hexToBytes(envelope.getString("iv")).size)
     }
 
     @Test

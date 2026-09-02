@@ -121,24 +121,25 @@ object KyPasswordEnvelopeCrypto {
         return value
     }
 
-    fun wrapVaultKey(vaultKey: ByteArray, secret: String, iterations: Int = DEFAULT_ITERATIONS): String {
+    /** Writes the Argon2id shape. Envelopes KyAuth wrote earlier stay readable; see [unwrapVaultKey]. */
+    fun wrapVaultKey(vaultKey: ByteArray, secret: String): String {
         val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }
         val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
 
-        val spec = PBEKeySpec(secret.toCharArray(), salt, iterations, KEY_LENGTH_BITS)
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val derivedKey = factory.generateSecret(spec).encoded
-        val keySpec = SecretKeySpec(derivedKey, "AES")
+        val derivedKey = argon2id(secret, salt, ARGON2ID_MEMORY_KIB, ARGON2ID_ITERATIONS, ARGON2ID_PARALLELISM)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(derivedKey, "AES"), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
         val ciphertext = cipher.doFinal(vaultKey)
 
         return JSONObject().apply {
+            put("kdf", KDF_ARGON2ID)
             put("salt", bytesToHex(salt))
             put("iv", bytesToHex(iv))
             put("ciphertext", bytesToHex(ciphertext))
-            put("iterations", iterations)
+            put("memoryKiB", ARGON2ID_MEMORY_KIB)
+            put("iterations", ARGON2ID_ITERATIONS)
+            put("parallelism", ARGON2ID_PARALLELISM)
         }.toString()
     }
 
