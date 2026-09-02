@@ -21,6 +21,7 @@ import android.service.credentials.CredentialProviderService
 import androidx.annotation.RequiresApi
 import java.io.File
 import org.json.JSONObject
+import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.KyAuthAutofillService
@@ -86,15 +87,33 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                 ) {
                     return responseBuilder.build()
                 }
+                val isSignOn = SignOnPasskey.isSignOnRpId(rpId, PairingStore(this).account()?.serverUrl)
                 val userObj = json.optJSONObject("user")
                 val username = userObj?.optString("name")?.ifBlank { null }
                     ?: userObj?.optString("displayName").orEmpty()
 
-                val title = if (username.isNotBlank()) "Create Passkey for $username" else "Create Passkey"
-                val subtitle = "Save Passkey for $rpId in KyAuth"
+                val title = if (isSignOn) {
+                    "Create KySignOn Passkey"
+                } else if (username.isNotBlank()) {
+                    "Create Passkey for $username"
+                } else {
+                    "Create Passkey"
+                }
+                val subtitle = if (isSignOn) {
+                    "Stays on this device, in secure hardware"
+                } else {
+                    "Save Passkey for $rpId in KyAuth"
+                }
 
                 val intent = Intent(this, CredentialAuthActivity::class.java).apply {
-                    putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_CREATE_PASSKEY)
+                    putExtra(
+                        CredentialAuthActivity.EXTRA_ACTION,
+                        if (isSignOn) {
+                            CredentialAuthActivity.ACTION_CREATE_SIGNON_PASSKEY
+                        } else {
+                            CredentialAuthActivity.ACTION_CREATE_PASSKEY
+                        },
+                    )
                     putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
                     putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
                     putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
