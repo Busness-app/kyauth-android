@@ -3,7 +3,6 @@ package org.kysecurity.authenticator.passkeys
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -47,8 +46,13 @@ object SignOnPasskeyKey {
     fun generate(alias: String): Generated {
         delete(alias)
         val strongBox = runCatching { generateKey(alias, strongBox = true) }
-            .fold(onSuccess = { true }, onFailure = { error ->
-                if (error !is StrongBoxUnavailableException) throw error
+            .fold(onSuccess = { true }, onFailure = {
+                // Any failure of the StrongBox attempt falls back to the TEE, not only
+                // StrongBoxUnavailableException: setUnlockedDeviceRequired plus StrongBox throws
+                // assorted ProviderExceptions on real devices whose TEE is perfectly capable, and
+                // no emulator can reproduce that. The fail-closed guarantee comes from the
+                // isHardwareBacked() check below, not from the exception type, so widening here
+                // cannot admit a software key.
                 generateKey(alias, strongBox = false)
                 false
             })

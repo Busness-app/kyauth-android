@@ -139,8 +139,8 @@ Recorded so it is not mistaken for done:
 - **Device verification.** Emulator tests cover secure-lock-backed `VaultKek` creation and backup
   flags. Full biometric prompts, `useVaultKeys`, provider unlock flows, and the per-use
   `BiometricPrompt` for the KySignOn passkey (enrolment and assertion, via
-  `VaultUnlockPrompt.showForSignature`) still require manual device verification; none of these can
-  be driven from an automated test in this project.
+  `VaultUnlockPrompt.showForSignature`) still require manual device verification; none of these are
+  currently automated here.
 - **Deprecated platform APIs.** `Slice`, `EncryptedSharedPreferences`/`MasterKey`, and the
   `Dataset`/`FillResponse` builders are deprecated. Moving to `androidx.credentials` would remove
   most of the Slice usage.

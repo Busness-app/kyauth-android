@@ -17,7 +17,10 @@ class SecurityWipeAliasTest {
             "kyauth_credential_pepper",
             "kyauth_pin_pepper",
             "kysignon-device-signing-v1",
-            "kyauth_signon_passkey_v1",
+            // Both halves of the alternating KySignOn passkey pair; a key left behind here is a
+            // live authentication factor surviving a wipe.
+            "kyauth_signon_passkey_a",
+            "kyauth_signon_passkey_b",
         )
         for (alias in aliases) {
             assertTrue("wipe would leave $alias behind", SecurityWipe.isAppAlias(alias))

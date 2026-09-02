@@ -248,6 +248,14 @@ class MainActivity : AppCompatActivity() {
                                 progress.visibility = ProgressBar.GONE
                                 triggerBtn?.isEnabled = true
                                 result.onSuccess { account ->
+                                    // Pairing to a different server strands the old KySignOn
+                                    // passkey: its key and record belong to a server this device
+                                    // no longer talks to. Clear the same pair the Unpair path does.
+                                    val previous = runCatching { store.account()?.serverUrl }.getOrNull()
+                                    if (previous != null && previous != account.serverUrl) {
+                                        SignOnPasskeyKey.deleteAll()
+                                        runCatching { SignOnPasskeyStore(this@MainActivity).clear() }
+                                    }
                                     store.save(account)
                                     unlockWithPrompt()
                                 }.onFailure { error.text = it.message ?: "Pairing failed" }
@@ -1828,7 +1836,9 @@ class MainActivity : AppCompatActivity() {
 
         val signOnPasskeySection = settingsCard()
         signOnPasskeySection.addView(title(getString(R.string.signon_passkey_title)))
-        val signOnRecord = SignOnPasskeyStore(this).record()
+        // EncryptedSharedPreferences can throw after a device restore or keyset invalidation;
+        // Settings must still render, showing "none" rather than crashing the app.
+        val signOnRecord = runCatching { SignOnPasskeyStore(this).record() }.getOrNull()
         if (signOnRecord == null) {
             signOnPasskeySection.addView(message(getString(R.string.signon_passkey_none)))
         } else {

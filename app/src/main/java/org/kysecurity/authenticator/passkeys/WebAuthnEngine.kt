@@ -141,6 +141,11 @@ object WebAuthnEngine {
      * Signs with an already-initialised [Signature]. A Keystore-resident private key is never
      * handed out as an [ECPrivateKey] — the caller only ever holds a Signature the framework has
      * authenticated — so this is the primitive and the key-based overload delegates to it.
+     *
+     * [signature] must be freshly initialised: `update()` must not have been called on it. This is
+     * load-bearing, not hygiene — a partially updated Signature signs those earlier bytes too, so
+     * the result would verify against something other than authData || clientDataHash while still
+     * looking like a valid signature.
      */
     fun signAssertion(
         signature: Signature,

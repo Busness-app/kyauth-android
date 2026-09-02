@@ -74,7 +74,16 @@ object VaultUnlockPrompt {
             ContextCompat.getMainExecutor(activity),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    onAuthenticated(result.cryptoObject?.signature ?: signature)
+                    // No fallback to the unauthenticated `signature`: handing that back would be a
+                    // Signature the framework never bound to this authentication. On the assertion
+                    // path it would fail at sign(), but on the enrolment path nothing forces a
+                    // signature, so the substitution would pass silently.
+                    val authenticated = result.cryptoObject?.signature
+                    if (authenticated == null) {
+                        onFailed("Authentication did not return a usable signing key.")
+                        return
+                    }
+                    onAuthenticated(authenticated)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

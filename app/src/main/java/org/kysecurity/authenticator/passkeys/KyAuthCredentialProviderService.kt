@@ -134,7 +134,19 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
                 ) {
                     return responseBuilder.build()
                 }
-                val isSignOn = SignOnPasskey.isSignOnRpId(rpId, PairingStore(this).account()?.serverUrl)
+                // EncryptedSharedPreferences can throw after a device restore or keyset
+                // invalidation, and this runs on a bare Thread in a Service: an uncaught throw
+                // would kill the process with the OutcomeReceiver never called, hanging the
+                // picker. A failed read is also not "unpaired" — it cannot rule out that this is
+                // KySignOn — so it refuses rather than falling through to the vault path.
+                val pairing = runCatching { PairingStore(this).account()?.serverUrl }
+                if (pairing.isFailure) return responseBuilder.build()
+                val serverUrl = pairing.getOrNull()
+                val isSignOn = SignOnPasskey.isSignOnRpId(rpId, serverUrl)
+                // KySignOn-ish but not exactly routable to hardware: offer no create entry at all.
+                // Minting here would write a KySignOn login private key into passwords_vault.kdbx,
+                // which syncs to KyPasswords and holds it exportably. See refusesVaultPasskeyCreate.
+                if (refusesVaultPasskeyCreate(rpId, serverUrl)) return responseBuilder.build()
                 val userObj = json.optJSONObject("user")
                 val username = userObj?.optString("name")?.ifBlank { null }
                     ?: userObj?.optString("displayName").orEmpty()

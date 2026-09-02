@@ -34,6 +34,21 @@ internal fun suppressesVaultPasskeys(rpId: String, signOnServerUrl: String?): Bo
 }
 
 /**
+ * Create-path guard: the request is the paired KySignOn host by the lenient test above, but is not
+ * exactly routable to hardware by [SignOnPasskey.isSignOnRpId], so nothing may be minted for it.
+ *
+ * The two predicates disagree whenever the request and the paired host differ only by a leading
+ * "www." — a real configuration, since the pairing URL and the server's `rp.id` are set
+ * independently. Minting into `passwords_vault.kdbx` there would put a KySignOn login private key
+ * into an exportable, KyPasswords-synced artifact, which is the exact outcome this design removes;
+ * and the get path, which uses the lenient test, would then hide the entry anyway, leaving a
+ * credential the server believes in and the device can never use. Refusing to create is the only
+ * correct failure mode.
+ */
+internal fun refusesVaultPasskeyCreate(rpId: String, signOnServerUrl: String?): Boolean =
+    suppressesVaultPasskeys(rpId, signOnServerUrl) && !SignOnPasskey.isSignOnRpId(rpId, signOnServerUrl)
+
+/**
  * Turns a credential query into the entries offered to the user.
  *
  * The hardware-backed KySignOn passkey needs no vault key, so [KyAuthCredentialProviderService]
@@ -99,6 +114,12 @@ object CredentialEntryBuilder {
 
         // Fail closed: an RP ID we cannot validate against the caller gets no entries at all.
         val rpId = RpId.validate(json.optString("rpId"), webOriginHost) ?: return
+        // Nothing here could be offered to this caller, so stop before the DigitalAssetLinks fetch
+        // below: that fetch is an HTTPS request to a host the caller names, and an rpId unrelated to
+        // anything we hold must short-circuit identically whether or not a KySignOn passkey is
+        // enrolled. Otherwise a locked device answers "is one enrolled?" in the attacker's own
+        // server log. Costs nothing when unlocked, where entries is normally non-empty.
+        if (entries.isEmpty() && signOnPasskey?.rpId != rpId) return
         // A native caller named this RP itself; only the RP can confirm the claim.
         if (webOriginHost == null &&
             !DigitalAssetLinks.isCallerAuthorized(rpId, callerPackage, callerSigningInfo)
@@ -183,7 +204,8 @@ object CredentialEntryBuilder {
         requestCode: Int,
     ) {
         val domain = DomainMatcher.extractDomain(origin) ?: return
-        for (entry in entries.filter { it.password.isNotBlank() && DomainMatcher.matchesPassword(it, domain) }) {
+        val matches = entries.filter { it.password.isNotBlank() && DomainMatcher.matchesPassword(it, domain) }
+        for ((index, entry) in matches.withIndex()) {
             val title = entry.username.ifBlank { entry.title }
             val intent = Intent(context, CredentialAuthActivity::class.java).apply {
                 putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSWORD)
@@ -198,7 +220,11 @@ object CredentialEntryBuilder {
                     title = title,
                     subtitle = "Password • ${entry.title}",
                     fillIntent = intent,
-                    requestCode = requestCode,
+                    // Same reason as the passkey loop above: without a distinct code per entry
+                    // every row collapses onto one PendingIntent and they all fire the last
+                    // entry's extras. Each option gets its own requestCode, so this cannot
+                    // collide with the passkey codes or with the local entry's requestCode + 500.
+                    requestCode = requestCode * 1000 + index,
                 ),
             )
         }
