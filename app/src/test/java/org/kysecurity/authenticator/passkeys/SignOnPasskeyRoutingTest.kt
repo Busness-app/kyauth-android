@@ -49,4 +49,40 @@ class SignOnPasskeyRoutingTest {
         assertFalse(SignOnPasskey.isSignOnRpId("signon.example.com", server))
         assertFalse(SignOnPasskey.isSignOnRpId("blog.signon.example.com", server))
     }
+
+    // suppressesVaultPasskeys is the deny-side test in CredentialEntryBuilder.kt that decides
+    // whether a synced-vault passkey is offered. Unlike isSignOnRpId it must be www-insensitive on
+    // BOTH sides: DomainMatcher.matchesPasskey (which selects the vault entries this guards) itself
+    // normalizes away a leading "www.", so an exact compare here would let a stranded KySignOn
+    // passkey through whenever the stored rpId or the incoming request differs from the paired host
+    // only by that prefix.
+
+    @Test
+    fun `suppresses vault passkeys when the stored passkey has a leading www the request lacks`() {
+        // The direction round 1 already fixed: request matches the paired host exactly, the vault
+        // holds a "www." variant. Caught because matchesPasskey would still offer it.
+        assertTrue(suppressesVaultPasskeys("signon.example.com", "https://signon.example.com"))
+    }
+
+    @Test
+    fun `suppresses vault passkeys when the request has a leading www the paired host lacks`() {
+        // The direction round 1 missed: paired host is bare, the request itself carries "www.".
+        // isSignOnRpId would say false here (exact compare), but matchesPasskey would still match
+        // a bare-host stored passkey against this request, so it must still be suppressed.
+        assertTrue(suppressesVaultPasskeys("www.signon.example.com", "https://signon.example.com"))
+    }
+
+    @Test
+    fun `an unpaired device never suppresses vault passkeys`() {
+        assertFalse(suppressesVaultPasskeys("signon.example.com", null))
+        assertFalse(suppressesVaultPasskeys("www.signon.example.com", null))
+    }
+
+    @Test
+    fun `an unrelated rp is never suppressed`() {
+        val server = "https://signon.example.com"
+        assertFalse(suppressesVaultPasskeys("example.com", server))
+        assertFalse(suppressesVaultPasskeys("attacker.test", server))
+        assertFalse(suppressesVaultPasskeys("login.signon.example.com", server))
+    }
 }

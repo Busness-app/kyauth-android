@@ -14,6 +14,26 @@ import org.kysecurity.authenticator.passwords.DomainMatcher
 import org.kysecurity.authenticator.passwords.PasswordEntry
 
 /**
+ * Deny-side test for whether vault passkeys should be suppressed for [rpId] because the request
+ * is, www-insensitively, the paired KySignOn host.
+ *
+ * Deliberately more lenient than [SignOnPasskey.isSignOnRpId]: [DomainMatcher.matchesPasskey]
+ * normalizes away a leading "www.", but [RpId.normalize] (which backs [SignOnPasskey.isSignOnRpId])
+ * does not. An exact compare here would let a stranded vault passkey through whenever the request
+ * and the paired host differ only by that prefix, in either direction. [SignOnPasskey.isSignOnRpId]
+ * itself stays exact, because it also gates enrolment and routing to hardware, where this leniency
+ * would widen the security boundary instead of only narrowing what the vault offers.
+ *
+ * A top-level internal function, not a method on [CredentialEntryBuilder]: kept pure and free of
+ * this file's `@RequiresApi` framework surface so it stays trivially testable from a plain JVM
+ * unit test (verified empirically to work fine even inside this file, but this is clearer intent).
+ */
+internal fun suppressesVaultPasskeys(rpId: String, signOnServerUrl: String?): Boolean {
+    val paired = SignOnPasskey.signOnRpId(signOnServerUrl) ?: return false
+    return DomainMatcher.normalizeHost(paired) == DomainMatcher.normalizeHost(rpId)
+}
+
+/**
  * Turns a credential query into the entries offered to the user.
  *
  * The hardware-backed KySignOn passkey needs no vault key, so [KyAuthCredentialProviderService]
@@ -118,11 +138,9 @@ object CredentialEntryBuilder {
         }
 
         // A KySignOn passkey in the synced vault is never offered: it must be re-enrolled into
-        // secure hardware. Tested against the validated request rpId, not the stored passkey's
-        // rpId, because DomainMatcher.matchesPasskey below is lenient about a leading "www." while
-        // isSignOnRpId is exact — testing the stored value would let www.<host> slip through.
-        val isSignOnRequest = SignOnPasskey.isSignOnRpId(rpId, signOnServerUrl)
-        if (!isSignOnRequest) {
+        // secure hardware. See suppressesVaultPasskeys for why this is www-insensitive on both
+        // sides, unlike SignOnPasskey.isSignOnRpId.
+        if (!suppressesVaultPasskeys(rpId, signOnServerUrl)) {
             val matches = entries.filter { DomainMatcher.matchesPasskey(it, rpId) }
             for ((index, entry) in matches.withIndex()) {
                 val passkey = entry.passkey ?: continue
