@@ -103,12 +103,23 @@ object SignOnPasskeyKey {
         }.generateKeyPair()
     }
 
-    /** Asks the platform what actually backs the key rather than trusting the request. */
+    /**
+     * Asks the platform what actually backs the key rather than trusting the request.
+     *
+     * True only for the three levels that assert secure hardware. `SECURITY_LEVEL_UNKNOWN` means
+     * the platform could not determine the level at all, and "I don't know" must not pass the one
+     * check standing between a KySignOn login passkey and a key that could be exportable.
+     * `SECURITY_LEVEL_UNKNOWN_SECURE` is accepted: it asserts secure hardware of an unspecified
+     * kind, which is what some pre-KeyMint devices report, and refusing it would fail enrolment on
+     * hardware that is genuinely fine.
+     */
     private fun isHardwareBacked(alias: String): Boolean = runCatching {
         val privateKey = keyStore().getKey(alias, null) as PrivateKey
         val info = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
             .getKeySpec(privateKey, KeyInfo::class.java)
-        info.securityLevel != KeyProperties.SECURITY_LEVEL_SOFTWARE
+        info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
+            info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX ||
+            info.securityLevel == KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE
     }.getOrDefault(false)
 
     private fun keyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }

@@ -122,13 +122,15 @@ Recorded so it is not mistaken for done:
 - **KySignOn passkey attestation.** Even when the key is hardware-backed, `fmt` is still `none`, so
   the server has only the client's word for it. `setAttestationChallenge` plus a verifier in
   `kysignon-server` would make it evidence.
-- **KySignOn passkey hardware backing is unverified.** `SignOnPasskeyKey.generate` refuses any key
-  whose `KeyInfo.securityLevel` is `SECURITY_LEVEL_SOFTWARE`, and that fail-closed path is covered
-  by a passing instrumented test. The positive path is not: every available Android emulator ships
-  the software KeyMint reference implementation, so `generate` returning a hardware-backed key has
-  never been observed succeeding. Four instrumented tests in `SignOnPasskeyKeyTest` are gated behind
-  a JUnit assumption and SKIP rather than pass. Running them on a physical device is what closes
-  this; until then, do not claim the key is hardware-resident.
+- **KySignOn passkey hardware backing is unverified.** `SignOnPasskeyKey.generate` accepts a key
+  only when `KeyInfo.securityLevel` is `TRUSTED_ENVIRONMENT`, `STRONGBOX` or `UNKNOWN_SECURE`, so
+  both `SOFTWARE` and `UNKNOWN` ("the platform could not tell") are refused; the fail-closed path
+  is covered by a passing instrumented test. The positive path is not: every available Android
+  emulator ships the software KeyMint reference implementation, so `generate` returning a
+  hardware-backed key has never been observed succeeding. Four instrumented tests in
+  `SignOnPasskeyKeyTest` are gated behind a JUnit assumption and SKIP rather than pass. Running
+  them on a physical device is what closes this; until then, do not claim the key is
+  hardware-resident.
 - **Credential picker accumulation is unverified.** While locked, the provider returns the KySignOn
   entry alongside the unlock action, and `CredentialUnlockActivity` deliberately passes
   `signOnPasskey = null` so the entry is not duplicated after unlocking. That is correct only if the
