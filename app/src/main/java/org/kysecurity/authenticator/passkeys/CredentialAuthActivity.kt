@@ -256,8 +256,9 @@ class CredentialAuthActivity : AppCompatActivity() {
      * Enrols the KySignOn passkey into secure hardware. Nothing here touches a vault key: that
      * independence is the point, so the factor keeps working when the password vault does not.
      *
-     * The new key goes into the spare alias and the stored record is only replaced once the
-     * response is built, so a cancelled prompt leaves any existing passkey untouched.
+     * The new key goes into the spare alias. The stored record is replaced and the old key
+     * deleted only once the new key has been generated and authenticated, so a cancelled prompt
+     * leaves any existing passkey untouched; the response is assembled immediately after.
      */
     private fun createSignOnPasskey() {
         val requestJson = intent.getStringExtra(EXTRA_REQUEST_JSON).orEmpty()
@@ -290,10 +291,8 @@ class CredentialAuthActivity : AppCompatActivity() {
         val store = SignOnPasskeyStore(applicationContext)
         val live = store.record()
         val alias = SignOnPasskeyKey.spareAlias(live?.alias)
-        val generated = runCatching { SignOnPasskeyKey.generate(alias) }.getOrElse { error ->
-            return finishWithFailure(
-                error.message ?: "This device cannot store a KySignOn passkey in secure hardware",
-            )
+        val generated = runCatching { SignOnPasskeyKey.generate(alias) }.getOrElse {
+            return finishWithFailure("This device cannot store a KySignOn passkey in secure hardware")
         }
         val signature = SignOnPasskeyKey.signatureFor(alias) ?: run {
             SignOnPasskeyKey.delete(alias)
