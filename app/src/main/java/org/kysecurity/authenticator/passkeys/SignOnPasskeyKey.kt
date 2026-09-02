@@ -54,8 +54,9 @@ object SignOnPasskeyKey {
             })
 
         val publicKey = keyStore().getCertificate(alias)?.publicKey as? ECPublicKey
-            ?: throw NoHardwareKeystore()
-        if (!isHardwareBacked(alias)) {
+        // Every failure exit deletes the alias: a rejected key must not outlive the call that
+        // rejected it.
+        if (publicKey == null || !isHardwareBacked(alias)) {
             delete(alias)
             throw NoHardwareKeystore()
         }
