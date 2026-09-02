@@ -89,35 +89,6 @@ class KdbxPasswordVaultTest {
     }
 
     @Test
-    fun readsTheUrlFromVaultsKyAuthWroteUnderTheLegacyKey() {
-        // KyAuth wrote "Url" before the key was corrected. Those entries must not lose their URL.
-        val vaultFile = File(tempFolder.root, "legacy-url-key.kdbx")
-        val vaultKey = CredentialCipher.generateVaultKey()
-        val credentials = Credentials.from(EncryptedValue.fromString(KyPasswordEnvelopeCrypto.bytesToHex(vaultKey)))
-        val legacyEntry = Entry(
-            uuid = UUID.randomUUID(),
-            fields = EntryFields(
-                mapOf(
-                    "Title" to EntryValue.Plain("Legacy"),
-                    "Password" to EntryValue.Plain("p"),
-                    "Url" to EntryValue.Plain("https://legacy.example.test"),
-                ),
-            ),
-        )
-        val output = ByteArrayOutputStream()
-        KeePassDatabase.Ver4x
-            .create(rootName = "KyAuth Passwords", meta = Meta(generator = "test"), credentials = credentials)
-            .modifyParentGroup { copy(entries = listOf(legacyEntry)) }
-            .encode(output)
-        vaultFile.writeBytes(output.toByteArray())
-
-        assertEquals(
-            "https://legacy.example.test",
-            KdbxPasswordVault.loadEntries(vaultFile, vaultKey).single().url,
-        )
-    }
-
-    @Test
     fun writesAndReadsPasswordEntriesWithoutATotpVault() {
         val vaultFile = File(tempFolder.root, "passwords_vault.kdbx")
         val vaultKey = CredentialCipher.generateVaultKey()

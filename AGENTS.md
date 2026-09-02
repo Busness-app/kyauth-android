@@ -31,13 +31,12 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   envelope the app does not understand. Argon2id costs are server-supplied, so they are range-
   checked before anything is allocated (256 MiB ceiling) and rejected, not clamped.
   KyAuth writes `argon2id` at the same OWASP baseline the web client uses (64 MiB, t=3, p=1).
-  An older KyAuth build cannot read what a current one writes, so read support must reach the
-  fleet before the write path does.
+  The PBKDF2 read path stays because KyPasswords servers still hold envelopes written before
+  the web client moved; it is not there for KyAuth's own past output.
 - KDBX entry fields use the KeePass wire names from kotpass's `BasicField.key`, not the enum
   constant `name`. The two differ only for the URL field (`URL` vs `Url`); KyAuth used the constant,
   so its URLs were invisible to KeePassXC, KeePassDX and the KyPasswords web client, and theirs to
-  KyAuth. Reads fall back to the legacy `Url` key so existing vaults keep their URLs, and the next
-  save migrates the entry. Proven by `kypasswords-web-vault.kdbx`, a fixture written by kdbxweb.
+  KyAuth. Proven by `kypasswords-web-vault.kdbx`, a fixture written by kdbxweb.
 - Passwords and Passkeys use `passwords_vault.kdbx`. The app can generate an independent random local vault key for device-only storage. Pairing with an empty KyPasswords account uploads that local vault with a client-created password envelope; pairing never replaces an existing server vault that uses another key.
 - A passkey whose RP ID is the paired KySignOn server's host is the exception: its private key is
   generated in AndroidKeyStore (StrongBox where available, TEE otherwise), is non-exportable, and

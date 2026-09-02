@@ -17,7 +17,6 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import org.kysecurity.authenticator.security.writeAtomically
-import org.kysecurity.authenticator.urlOrLegacy
 
 /** Serialized like [org.kysecurity.authenticator.passwords.KdbxPasswordVault]; load throws on a corrupt vault. */
 object KdbxTotpVault {
@@ -37,7 +36,7 @@ object KdbxTotpVault {
         fun extractEntries(group: Group) {
             for (entry in group.entries) {
                 val title = entry.fields[BasicField.Title.key]?.content ?: "Unnamed"
-                val url = entry.fields.urlOrLegacy()
+                val url = entry.fields.url?.content?.ifBlank { null }
                 val notes = entry.fields[BasicField.Notes.key]?.content?.ifBlank { null }
                 val customMap = mutableMapOf<String, String>()
                 for ((key, value) in entry.fields) {
