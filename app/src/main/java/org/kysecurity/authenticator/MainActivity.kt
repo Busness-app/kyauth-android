@@ -62,6 +62,7 @@ import org.kysecurity.authenticator.passkeys.SignOnPasskeyKey
 import org.kysecurity.authenticator.passkeys.SignOnPasskeyStore
 import org.kysecurity.authenticator.passkeys.suppressesVaultPasskeys
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
+import org.kysecurity.authenticator.passwords.OfflineVaultKey
 import org.kysecurity.authenticator.passwords.PasswordEntry
 import org.kysecurity.authenticator.passwords.PasswordGenerator
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordClient
@@ -1897,6 +1898,23 @@ class MainActivity : AppCompatActivity() {
         }
         sections.add(kyPasswordsSection)
 
+        val offlineKeySection = settingsCard()
+        offlineKeySection.addView(title("Offline Vault Key"))
+        offlineKeySection.addView(
+            message(
+                "This key is the password of passwords_vault.kdbx. It opens a downloaded copy of " +
+                    "your vault in KeePassXC or KeePassDX with no server involved, which is what " +
+                    "you have left if KySignOn is unreachable.",
+            ),
+        )
+        offlineKeySection.addView(
+            secondaryButton("Reveal offline vault key").apply {
+                setOnClickListener { confirmRevealOfflineVaultKey() }
+            },
+            fullWidthParams(top = 10),
+        )
+        sections.add(offlineKeySection)
+
         val accountSection = settingsCard()
         accountSection.addView(title("Paired Account"))
         accountSection.addView(message("Server: ${account.serverUrl}\nDevice ID: ${account.deviceId}\nDevice Name: ${account.deviceName}\nUser ID: ${account.userId ?: "N/A"}"))
@@ -2058,6 +2076,69 @@ class MainActivity : AppCompatActivity() {
 
         dialog = AlertDialog.Builder(this)
             .setView(container)
+            .showKyDialog()
+    }
+
+    /**
+     * The warning comes before the prompt, not after: authenticating is the user authorising the
+     * reveal, and they cannot authorise what they have not been told. Unlike the master password
+     * this key cannot be rotated without re-encrypting the vault, so a careless reveal is
+     * permanent.
+     */
+    private fun confirmRevealOfflineVaultKey() {
+        if (AppLockManager.getPasswordVaultKey() == null) {
+            Toast.makeText(this, "Unlock your vault first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Reveal offline vault key")
+            .setMessage(
+                "This key unlocks every password and passkey in your vault, on any device, " +
+                    "forever. Unlike your master password it cannot be changed without " +
+                    "re-encrypting the vault. Anyone who sees it has your vault.",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Reveal") { _, _ ->
+                authenticateWithBiometrics(
+                    reason = "Reveal offline vault key",
+                    onSuccess = { showOfflineVaultKey() },
+                )
+            }
+            .showKyDialog()
+    }
+
+    private fun showOfflineVaultKey() {
+        // Re-read rather than capture at confirmation time: the app can lock while the prompt is up.
+        val vaultKey = AppLockManager.getPasswordVaultKey()
+        if (vaultKey == null) {
+            Toast.makeText(this, "Unlock your vault first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        container.addView(TextView(this).apply {
+            text = OfflineVaultKey.formatForDisplay(vaultKey)
+            textSize = 18f
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setTextColor(ThemeManager.color(context, R.color.ky_text))
+            setPadding(0, dp(16), 0, dp(16))
+        })
+        container.addView(message("Type it without the spaces. Treat it like the vault itself."))
+
+        AlertDialog.Builder(this)
+            .setTitle("Offline Vault Key")
+            .setView(container)
+            // The grouping is a reading aid; the password is the unbroken hex.
+            .setNeutralButton("Copy") { _, _ ->
+                copySensitiveText(KyPasswordEnvelopeCrypto.bytesToHex(vaultKey), 30)
+                Toast.makeText(this, "Vault key copied for 30 seconds", Toast.LENGTH_SHORT).show()
+            }
+            .setPositiveButton("Done", null)
             .showKyDialog()
     }
 
