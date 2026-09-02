@@ -48,11 +48,46 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
     }
 
     private fun buildGetResponse(request: BeginGetCredentialRequest): BeginGetCredentialResponse {
-        val vaultKey = AppLockManager.getPasswordVaultKey() ?: return lockedResponse()
-        val entries = runCatching {
-            KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), vaultKey)
-        }.getOrNull() ?: return lockedResponse()
-        return CredentialEntryBuilder.build(this, request, entries)
+        val signOnPasskey = SignOnPasskeyStore(this).record()
+        val serverUrl = PairingStore(this).account()?.serverUrl
+        val vaultKey = AppLockManager.getPasswordVaultKey()
+        val entries = vaultKey?.let {
+            runCatching {
+                KdbxPasswordVault.loadEntries(File(filesDir, KyAuthAutofillService.VAULT_FILE_NAME), it)
+            }.getOrNull()
+        }
+        // While the vault is unavailable the KySignOn passkey is still offered: it needs no vault
+        // key, and routing it through "Unlock KyAuth" would make KySignOn MFA depend on the
+        // password vault, which is exactly what this design removes.
+        return CredentialEntryBuilder.build(
+            context = this,
+            request = request,
+            entries = entries.orEmpty(),
+            signOnPasskey = signOnPasskey,
+            signOnServerUrl = serverUrl,
+            authenticationAction = if (entries == null) unlockAction() else null,
+        )
+    }
+
+    /** An invitation to authenticate; touches no vault material. */
+    private fun unlockAction(): Action {
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            3001,
+            Intent(this, CredentialUnlockActivity::class.java),
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val spec = SliceSpec("kyauth", 1)
+        val slice = Slice.Builder(Uri.parse("kyauth://unlock"), spec)
+            .addAction(
+                pendingIntent,
+                Slice.Builder(Uri.parse("kyauth://unlock/action"), spec).build(),
+                null,
+            )
+            .addText("Unlock KyAuth", null, listOf(Slice.HINT_TITLE))
+            .addText("Authenticate to see your credentials", null, listOf(Slice.HINT_SUMMARY))
+            .build()
+        return Action(slice)
     }
 
     override fun onBeginCreateCredential(
@@ -188,28 +223,5 @@ class KyAuthCredentialProviderService : CredentialProviderService() {
         callback: OutcomeReceiver<Void?, ClearCredentialStateException>,
     ) {
         callback.onResult(null)
-    }
-
-    /** No entries, no vault access: just an invitation to authenticate. */
-    private fun lockedResponse(): BeginGetCredentialResponse {
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            3001,
-            Intent(this, CredentialUnlockActivity::class.java),
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val spec = SliceSpec("kyauth", 1)
-        val slice = Slice.Builder(Uri.parse("kyauth://unlock"), spec)
-            .addAction(
-                pendingIntent,
-                Slice.Builder(Uri.parse("kyauth://unlock/action"), spec).build(),
-                null,
-            )
-            .addText("Unlock KyAuth", null, listOf(Slice.HINT_TITLE))
-            .addText("Authenticate to see your credentials", null, listOf(Slice.HINT_SUMMARY))
-            .build()
-        return BeginGetCredentialResponse.Builder()
-            .addAuthenticationAction(Action(slice))
-            .build()
     }
 }

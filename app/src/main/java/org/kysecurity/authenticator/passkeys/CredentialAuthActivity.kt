@@ -233,6 +233,10 @@ class CredentialAuthActivity : AppCompatActivity() {
     }
 
     private fun authenticateAndExecute(action: String) {
+        if (action == ACTION_GET_SIGNON_PASSKEY) {
+            getSignOnPasskey()
+            return
+        }
         if (action == ACTION_CREATE_SIGNON_PASSKEY) {
             createSignOnPasskey()
             return
@@ -249,6 +253,96 @@ class CredentialAuthActivity : AppCompatActivity() {
                     finishWithCancellation()
                 }
             },
+        )
+    }
+
+    /**
+     * Asserts with the hardware-backed KySignOn passkey. Deliberately never calls
+     * [AppLockManager.useVaultKeys]: the private key is non-exportable and there is no vault key
+     * to unwrap, so this path is unaffected by the password vault's state.
+     */
+    private fun getSignOnPasskey() {
+        val store = SignOnPasskeyStore(applicationContext)
+        val record = store.record() ?: return finishWithFailure("No KySignOn passkey on this device")
+
+        val requestJson = intent.getStringExtra(EXTRA_REQUEST_JSON).orEmpty()
+        val json = runCatching { JSONObject(requestJson) }.getOrNull()
+            ?: return finishWithFailure("Malformed passkey request")
+        val rpId = intent.getStringExtra(EXTRA_RP_ID)?.takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no relying party")
+        if (RpId.normalize(json.optString("rpId")) != rpId) {
+            return finishWithFailure("Relying party does not match the request")
+        }
+        if (record.rpId != rpId) {
+            return finishWithFailure("This passkey does not belong to $rpId")
+        }
+        val challenge = json.optString("challenge").takeIf { it.isNotBlank() }
+            ?: return finishWithFailure("Request has no challenge")
+
+        val callerHash = intent.privilegedClientDataHash()
+        val clientDataJson = if (callerHash != null) {
+            null
+        } else {
+            val origin = intent.getStringExtra(EXTRA_ORIGIN)?.takeIf { it.isNotBlank() }
+                ?: return finishWithFailure("Caller origin is unavailable")
+            ClientData.serialize(
+                ClientData.TYPE_GET,
+                challenge,
+                origin,
+                intent.getStringExtra(EXTRA_CALLER_PACKAGE),
+            )
+        }
+        val clientDataHash = callerHash ?: WebAuthnEngine.sha256(requireNotNull(clientDataJson))
+
+        val signature = SignOnPasskeyKey.signatureFor(record.alias)
+            ?: return finishWithFailure(
+                "This KySignOn passkey is no longer usable. Enrol a new one from KySignOn.",
+            )
+
+        VaultUnlockPrompt.showForSignature(
+            activity = this,
+            subtitle = "Sign in to KySignOn",
+            signature = signature,
+            onAuthenticated = { authenticated ->
+                val newSignCount = record.signCount + 1
+                val authData = WebAuthnEngine.buildAssertionAuthData(record.rpId, newSignCount)
+                val signed = runCatching {
+                    WebAuthnEngine.signAssertion(authenticated, authData, clientDataHash)
+                }.getOrNull()
+                if (signed == null) {
+                    finishWithFailure("Could not sign the challenge")
+                    return@showForSignature
+                }
+
+                store.save(record.copy(signCount = newSignCount))
+
+                val responseJson = JSONObject().apply {
+                    put("id", b64(record.credentialId))
+                    put("rawId", b64(record.credentialId))
+                    put("type", "public-key")
+                    put(
+                        "response",
+                        JSONObject().apply {
+                            put("authenticatorData", b64(authData))
+                            put("signature", b64(signed))
+                            if (record.userHandle.isNotEmpty()) put("userHandle", b64(record.userHandle))
+                            if (clientDataJson != null) put("clientDataJSON", b64(clientDataJson))
+                        },
+                    )
+                }
+                val data = Bundle().apply {
+                    putString("androidx.credentials.BUNDLE_KEY_AUTHENTICATION_RESPONSE_JSON", responseJson.toString())
+                }
+                setResult(
+                    Activity.RESULT_OK,
+                    Intent().putExtra(
+                        CredentialProviderService.EXTRA_GET_CREDENTIAL_RESPONSE,
+                        GetCredentialResponse(Credential(TYPE_PUBLIC_KEY_CREDENTIAL, data)),
+                    ),
+                )
+                finish()
+            },
+            onFailed = { finishWithCancellation() },
         )
     }
 
@@ -683,6 +777,7 @@ class CredentialAuthActivity : AppCompatActivity() {
         const val ACTION_CREATE_PASSKEY = "org.kysecurity.authenticator.action.CREATE_PASSKEY"
         const val ACTION_CREATE_PASSWORD = "org.kysecurity.authenticator.action.CREATE_PASSWORD"
         const val ACTION_CREATE_SIGNON_PASSKEY = "org.kysecurity.authenticator.action.CREATE_SIGNON_PASSKEY"
+        const val ACTION_GET_SIGNON_PASSKEY = "org.kysecurity.authenticator.action.GET_SIGNON_PASSKEY"
 
         const val EXTRA_ACTION = "extra_action"
         const val EXTRA_ENTRY_ID = "extra_entry_id"

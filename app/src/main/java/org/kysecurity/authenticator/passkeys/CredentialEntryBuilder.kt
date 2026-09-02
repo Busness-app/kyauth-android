@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.SigningInfo
 import android.os.Build
+import android.service.credentials.Action
 import android.service.credentials.BeginGetCredentialOption
 import android.service.credentials.BeginGetCredentialRequest
 import android.service.credentials.BeginGetCredentialResponse
@@ -25,6 +26,9 @@ object CredentialEntryBuilder {
         context: Context,
         request: BeginGetCredentialRequest,
         entries: List<PasswordEntry>,
+        signOnPasskey: SignOnPasskeyRecord?,
+        signOnServerUrl: String?,
+        authenticationAction: Action? = null,
     ): BeginGetCredentialResponse {
         val callingAppInfo = request.callingAppInfo
         val origin = callingAppInfo?.origin
@@ -33,13 +37,15 @@ object CredentialEntryBuilder {
         val callerOrigin = origin ?: ClientData.apkKeyHashOrigin(callingAppInfo?.signingInfo)
 
         val responseBuilder = BeginGetCredentialResponse.Builder()
+        authenticationAction?.let(responseBuilder::addAuthenticationAction)
         var requestCode = 1000
         for (option in request.beginGetCredentialOptions) {
             when (option.type) {
                 TYPE_PUBLIC_KEY, TYPE_PUBLIC_KEY_ANDX ->
                     addPasskeyEntries(
-                        context, option, entries, webOriginHost, callerPackage, callerOrigin,
-                        origin, callingAppInfo?.signingInfo, responseBuilder, requestCode++,
+                        context, option, entries, signOnPasskey, signOnServerUrl, webOriginHost,
+                        callerPackage, callerOrigin, origin, callingAppInfo?.signingInfo,
+                        responseBuilder, requestCode++,
                     )
                 TYPE_PASSWORD, TYPE_PASSWORD_ANDX ->
                     addPasswordEntries(
@@ -55,6 +61,8 @@ object CredentialEntryBuilder {
         context: Context,
         option: BeginGetCredentialOption,
         entries: List<PasswordEntry>,
+        signOnPasskey: SignOnPasskeyRecord?,
+        signOnServerUrl: String?,
         webOriginHost: String?,
         callerPackage: String?,
         callerOrigin: String?,
@@ -81,8 +89,37 @@ object CredentialEntryBuilder {
             option.candidateQueryData.getByteArray(BUNDLE_KEY_CLIENT_DATA_HASH),
         )
 
+        // The hardware-backed KySignOn passkey. Offered without any vault key, so it survives the
+        // password vault being locked, compromised, or in recovery.
+        if (signOnPasskey != null && signOnPasskey.rpId == rpId) {
+            val title = signOnPasskey.username.ifBlank { rpId }
+            val intent = Intent(context, CredentialAuthActivity::class.java).apply {
+                putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_SIGNON_PASSKEY)
+                putExtra(CredentialAuthActivity.EXTRA_REQUEST_JSON, requestJson)
+                putExtra(CredentialAuthActivity.EXTRA_RP_ID, rpId)
+                putExtra(CredentialAuthActivity.EXTRA_ORIGIN, callerOrigin)
+                putExtra(CredentialAuthActivity.EXTRA_CALLER_PACKAGE, callerPackage)
+                putExtra(CredentialAuthActivity.EXTRA_CLIENT_DATA_HASH, clientDataHash)
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_TITLE, "Sign in to KySignOn")
+                putExtra(CredentialAuthActivity.EXTRA_DISPLAY_SUBTITLE, "$title (Passkey • this device)")
+            }
+            responseBuilder.addCredentialEntry(
+                CredentialSliceHelper.createGetCredentialEntry(
+                    context = context,
+                    option = option,
+                    title = title,
+                    subtitle = "Passkey • this device",
+                    fillIntent = intent,
+                    requestCode = requestCode + 500,
+                ),
+            )
+        }
+
         for (entry in entries.filter { DomainMatcher.matchesPasskey(it, rpId) }) {
             val passkey = entry.passkey ?: continue
+            // A KySignOn passkey in the synced vault is not offered: it must be re-enrolled into
+            // secure hardware. The Passwords tab badges it so the user knows why.
+            if (SignOnPasskey.isSignOnRpId(passkey.rpId, signOnServerUrl)) continue
             val title = passkey.username.ifBlank { entry.title }
             val intent = Intent(context, CredentialAuthActivity::class.java).apply {
                 putExtra(CredentialAuthActivity.EXTRA_ACTION, CredentialAuthActivity.ACTION_GET_PASSKEY)
