@@ -97,4 +97,24 @@ class WebAuthnAssertionTest {
         )
         assertArrayEquals(byteArrayOf(0, 0, 1, 2), authData.copyOfRange(33, 37))
     }
+
+    @Test
+    fun `signing through a Signature matches signing through a private key`() {
+        val keyPair = WebAuthnEngine.generateEcKeyPair()
+        val authData = WebAuthnEngine.buildAssertionAuthData("example.com", 1)
+        val clientDataHash = WebAuthnEngine.sha256("client data".toByteArray())
+
+        val viaSignature = java.security.Signature.getInstance("SHA256withECDSA").apply {
+            initSign(keyPair.private)
+        }
+        val fromSignature = WebAuthnEngine.signAssertion(viaSignature, authData, clientDataHash)
+
+        // ECDSA is randomised, so the bytes differ every time; both must verify against the key.
+        val verifier = java.security.Signature.getInstance("SHA256withECDSA").apply {
+            initVerify(keyPair.public)
+            update(authData)
+            update(clientDataHash)
+        }
+        org.junit.Assert.assertTrue(verifier.verify(fromSignature))
+    }
 }

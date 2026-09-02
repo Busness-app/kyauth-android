@@ -137,20 +137,30 @@ object WebAuthnEngine {
         return out.toByteArray()
     }
 
+    /**
+     * Signs with an already-initialised [Signature]. A Keystore-resident private key is never
+     * handed out as an [ECPrivateKey] — the caller only ever holds a Signature the framework has
+     * authenticated — so this is the primitive and the key-based overload delegates to it.
+     */
+    fun signAssertion(
+        signature: Signature,
+        authData: ByteArray,
+        clientDataHash: ByteArray,
+    ): ByteArray {
+        signature.update(authData)
+        signature.update(clientDataHash)
+        return signature.sign()
+    }
+
     fun signAssertion(
         privateKey: ECPrivateKey,
         authData: ByteArray,
         clientDataHash: ByteArray,
-    ): ByteArray {
-        val dataToSign = ByteArray(authData.size + clientDataHash.size)
-        System.arraycopy(authData, 0, dataToSign, 0, authData.size)
-        System.arraycopy(clientDataHash, 0, dataToSign, authData.size, clientDataHash.size)
-
-        val signer = Signature.getInstance("SHA256withECDSA")
-        signer.initSign(privateKey)
-        signer.update(dataToSign)
-        return signer.sign()
-    }
+    ): ByteArray = signAssertion(
+        Signature.getInstance("SHA256withECDSA").apply { initSign(privateKey) },
+        authData,
+        clientDataHash,
+    )
 
     fun sha256(data: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(data)
