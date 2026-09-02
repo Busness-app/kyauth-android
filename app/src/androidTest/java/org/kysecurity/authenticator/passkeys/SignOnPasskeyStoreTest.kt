@@ -52,4 +52,16 @@ class SignOnPasskeyStoreTest {
         store.clear()
         assertNull(store.record())
     }
+
+    @Test
+    fun securityWipeClearsTheRecord() {
+        // shared_prefs is a sibling of filesDir, so deleting filesDir does not reach this store.
+        // SecurityWipe must clear it explicitly or a wipe leaves metadata pointing at a key that
+        // step 5 of the same wipe has already deleted.
+        store.save(record())
+        org.kysecurity.authenticator.security.SecurityWipe.wipe(
+            ApplicationProvider.getApplicationContext(),
+        )
+        assertNull(store.record())
+    }
 }

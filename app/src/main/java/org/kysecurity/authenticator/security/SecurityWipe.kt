@@ -8,9 +8,10 @@ import java.security.KeyStore
 
 object SecurityWipe {
     fun wipe(context: Context) {
-        // 1. Wipe PairingStore and KyPasswordStore
+        // 1. Wipe PairingStore, KyPasswordStore and the KySignOn passkey record
         runCatching { PairingStore(context).clear() }
         runCatching { org.kysecurity.authenticator.passwords.kypasswords.KyPasswordStore(context).clear() }
+        runCatching { org.kysecurity.authenticator.passkeys.SignOnPasskeyStore(context).clear() }
 
         // 2. Wipe AppLock SharedPreferences
         runCatching {
