@@ -17,6 +17,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import org.kysecurity.authenticator.security.writeAtomically
+import org.kysecurity.authenticator.urlOrLegacy
 
 /** Serialized like [org.kysecurity.authenticator.passwords.KdbxPasswordVault]; load throws on a corrupt vault. */
 object KdbxTotpVault {
@@ -35,9 +36,9 @@ object KdbxTotpVault {
         val entries = mutableListOf<TotpEntry>()
         fun extractEntries(group: Group) {
             for (entry in group.entries) {
-                val title = entry.fields[BasicField.Title.name]?.content ?: "Unnamed"
-                val url = entry.fields[BasicField.Url.name]?.content?.ifBlank { null }
-                val notes = entry.fields[BasicField.Notes.name]?.content?.ifBlank { null }
+                val title = entry.fields[BasicField.Title.key]?.content ?: "Unnamed"
+                val url = entry.fields.urlOrLegacy()
+                val notes = entry.fields[BasicField.Notes.key]?.content?.ifBlank { null }
                 val customMap = mutableMapOf<String, String>()
                 for ((key, value) in entry.fields) {
                     if (key.startsWith("TimeOtp-")) {
@@ -63,10 +64,10 @@ object KdbxTotpVault {
 
         val kdbxEntries = entries.map { totp ->
             val fieldsMap = mutableMapOf<String, EntryValue>(
-                BasicField.Title.name to EntryValue.Plain(totp.title),
+                BasicField.Title.key to EntryValue.Plain(totp.title),
             )
-            totp.url?.let { fieldsMap[BasicField.Url.name] = EntryValue.Plain(it) }
-            totp.notes?.let { fieldsMap[BasicField.Notes.name] = EntryValue.Plain(it) }
+            totp.url?.let { fieldsMap[BasicField.Url.key] = EntryValue.Plain(it) }
+            totp.notes?.let { fieldsMap[BasicField.Notes.key] = EntryValue.Plain(it) }
             for ((k, v) in totp.keepassFields()) {
                 fieldsMap[k] = EntryValue.Plain(v)
             }

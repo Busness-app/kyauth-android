@@ -24,6 +24,20 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
 - Release builds disable screenshots and Android backup.
 - Push MFA receives KySignOn FCM data-message challenges, posts a local notification, and opens the Push MFA tab for approve/deny. A response is only ever sent to the paired server; a `serverUrl` in the push payload is ignored. Digits must be two-digit, decoys are capped at 3, and expiry is clamped to 10 minutes.
 - An MFA response must carry an explicit decision. A 2xx with no `approved`/`success` field is a protocol error, not an approval.
+- The KyPasswords key envelope carries a `kdf` field. `argon2id` derives with Argon2id (v1.3) using
+  the envelope's own `memoryKiB`/`iterations`/`parallelism`; **the absence of `kdf` is the
+  definition of PBKDF2-HMAC-SHA256** and is never inferred from the other fields. Any other value
+  is refused rather than falling through to PBKDF2, which would derive a wrong key from an
+  envelope the app does not understand. Argon2id costs are server-supplied, so they are range-
+  checked before anything is allocated (256 MiB ceiling) and rejected, not clamped.
+  KyAuth writes `argon2id` at the same OWASP baseline the web client uses (64 MiB, t=3, p=1).
+  An older KyAuth build cannot read what a current one writes, so read support must reach the
+  fleet before the write path does.
+- KDBX entry fields use the KeePass wire names from kotpass's `BasicField.key`, not the enum
+  constant `name`. The two differ only for the URL field (`URL` vs `Url`); KyAuth used the constant,
+  so its URLs were invisible to KeePassXC, KeePassDX and the KyPasswords web client, and theirs to
+  KyAuth. Reads fall back to the legacy `Url` key so existing vaults keep their URLs, and the next
+  save migrates the entry. Proven by `kypasswords-web-vault.kdbx`, a fixture written by kdbxweb.
 - Passwords and Passkeys use `passwords_vault.kdbx`. The app can generate an independent random local vault key for device-only storage. Pairing with an empty KyPasswords account uploads that local vault with a client-created password envelope; pairing never replaces an existing server vault that uses another key.
 - A passkey whose RP ID is the paired KySignOn server's host is the exception: its private key is
   generated in AndroidKeyStore (StrongBox where available, TEE otherwise), is non-exportable, and

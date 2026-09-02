@@ -17,6 +17,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import org.kysecurity.authenticator.security.writeAtomically
+import org.kysecurity.authenticator.urlOrLegacy
 
 /**
  * All access is serialized on this object: the UI, Autofill, the Credential Provider and vault
@@ -41,18 +42,18 @@ object KdbxPasswordVault {
         val entries = mutableListOf<PasswordEntry>()
         fun extract(group: Group) {
             group.entries.forEach { entry ->
-                val title = entry.fields[BasicField.Title.name]?.content.orEmpty()
-                val password = entry.fields[BasicField.Password.name]?.content.orEmpty()
+                val title = entry.fields[BasicField.Title.key]?.content.orEmpty()
+                val password = entry.fields[BasicField.Password.key]?.content.orEmpty()
                 val customMap = entry.fields.entries.associate { (k, v) -> k to v.content }
                 val passkey = PasskeyData.fromKeepassCustomFields(customMap)
                 if (title.isNotBlank() && (password.isNotBlank() || passkey != null)) {
                     entries.add(
                         PasswordEntry(
                             title = title,
-                            username = entry.fields[BasicField.UserName.name]?.content.orEmpty(),
+                            username = entry.fields[BasicField.UserName.key]?.content.orEmpty(),
                             password = password,
-                            url = entry.fields[BasicField.Url.name]?.content?.ifBlank { null },
-                            notes = entry.fields[BasicField.Notes.name]?.content?.ifBlank { null },
+                            url = entry.fields.urlOrLegacy(),
+                            notes = entry.fields[BasicField.Notes.key]?.content?.ifBlank { null },
                             passkey = passkey,
                             id = entry.uuid.toString(),
                         ),
@@ -89,12 +90,12 @@ object KdbxPasswordVault {
         val credentials = Credentials.from(EncryptedValue.fromString(bytesToHex(vaultKey)))
         val kdbxEntries = entries.map { password ->
             val fields = mutableMapOf<String, EntryValue>(
-                BasicField.Title.name to EntryValue.Plain(password.title),
-                BasicField.UserName.name to EntryValue.Plain(password.username),
-                BasicField.Password.name to EntryValue.Plain(password.password),
+                BasicField.Title.key to EntryValue.Plain(password.title),
+                BasicField.UserName.key to EntryValue.Plain(password.username),
+                BasicField.Password.key to EntryValue.Plain(password.password),
             )
-            password.url?.let { fields[BasicField.Url.name] = EntryValue.Plain(it) }
-            password.notes?.let { fields[BasicField.Notes.name] = EntryValue.Plain(it) }
+            password.url?.let { fields[BasicField.Url.key] = EntryValue.Plain(it) }
+            password.notes?.let { fields[BasicField.Notes.key] = EntryValue.Plain(it) }
             password.passkey?.toKeepassCustomFields()?.forEach { (k, v) ->
                 fields[k] = EntryValue.Plain(v)
             }
