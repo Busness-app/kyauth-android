@@ -58,6 +58,9 @@ import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.pairing.QrPairing
 import org.kysecurity.authenticator.pairing.QrPairingParser
 import org.kysecurity.authenticator.pairing.PushTokenProvider
+import org.kysecurity.authenticator.passkeys.SignOnPasskey
+import org.kysecurity.authenticator.passkeys.SignOnPasskeyKey
+import org.kysecurity.authenticator.passkeys.SignOnPasskeyStore
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.PasswordEntry
 import org.kysecurity.authenticator.passwords.PasswordGenerator
@@ -1043,16 +1046,25 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
 
+            val pairedServerUrl = PairingStore(this).account()?.serverUrl
+            val stranded = entry.passkey?.let {
+                SignOnPasskey.isSignOnRpId(it.rpId, pairedServerUrl)
+            } == true
             if (entry.isPasskey) {
                 headerRow.addView(TextView(this).apply {
-                    text = getString(R.string.passkey_badge)
+                    text = if (stranded) {
+                        getString(R.string.signon_passkey_restranded)
+                    } else {
+                        getString(R.string.passkey_badge)
+                    }
                     textSize = 11f
                     typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(ThemeManager.color(context, R.color.ky_cyan))
+                    val accent = if (stranded) R.color.ky_error else R.color.ky_cyan
+                    setTextColor(ThemeManager.color(context, accent))
                     background = GradientDrawable().apply {
                         setColor(ThemeManager.color(context, R.color.ky_surface_elevated))
                         cornerRadius = dp(6).toFloat()
-                        setStroke(dp(1), ThemeManager.color(context, R.color.ky_cyan))
+                        setStroke(dp(1), ThemeManager.color(context, accent))
                     }
                     setPadding(dp(8), dp(2), dp(8), dp(2))
                 })
@@ -1807,6 +1819,43 @@ class MainActivity : AppCompatActivity() {
         }, fullWidthParams())
         sections.add(providerSection)
 
+        val signOnPasskeySection = settingsCard()
+        signOnPasskeySection.addView(title(getString(R.string.signon_passkey_title)))
+        val signOnRecord = SignOnPasskeyStore(this).record()
+        if (signOnRecord == null) {
+            signOnPasskeySection.addView(message(getString(R.string.signon_passkey_none)))
+        } else {
+            val backing = if (signOnRecord.strongBoxBacked) {
+                R.string.signon_passkey_strongbox
+            } else {
+                R.string.signon_passkey_tee
+            }
+            signOnPasskeySection.addView(
+                message("${signOnRecord.username.ifBlank { signOnRecord.rpId }}\n${getString(backing)}"),
+            )
+            val btnRemove = secondaryButton(getString(R.string.signon_passkey_remove)).apply {
+                setTextColor(ThemeManager.color(context, R.color.ky_error))
+                setOnClickListener {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle(getString(R.string.signon_passkey_remove))
+                        .setMessage(
+                            "This passkey only exists on this device and cannot be recovered. " +
+                                "You will need your KySignOn recovery codes or an admin reset to " +
+                                "sign in without it.",
+                        )
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Remove") { _, _ ->
+                            SignOnPasskeyKey.deleteAll()
+                            SignOnPasskeyStore(this@MainActivity).clear()
+                            renderContent()
+                        }
+                        .showKyDialog()
+                }
+            }
+            signOnPasskeySection.addView(btnRemove, fullWidthParams())
+        }
+        sections.add(signOnPasskeySection)
+
         val kyPasswordsSection = settingsCard()
         kyPasswordsSection.addView(title("KyPasswords Server"))
         val kyAccount = kyPasswordStore.account()
@@ -1840,10 +1889,17 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("Unpair Device")
-                    .setMessage("Are you sure you want to unpair this device from KySignOn?")
+                    .setMessage(
+                        "Are you sure you want to unpair this device from KySignOn? " +
+                            "This also deletes the KySignOn passkey held on this device.",
+                    )
                     .setNegativeButton("Cancel", null)
                     .setPositiveButton("Unpair") { _, _ ->
                         store.clear()
+                        // A passkey for a server we are no longer paired to is dead weight, and
+                        // its key must not outlive the pairing.
+                        SignOnPasskeyKey.deleteAll()
+                        SignOnPasskeyStore(this@MainActivity).clear()
                         lockSensitiveState()
                         renderContent()
                     }
