@@ -58,9 +58,9 @@ import org.kysecurity.authenticator.pairing.PairingStore
 import org.kysecurity.authenticator.pairing.QrPairing
 import org.kysecurity.authenticator.pairing.QrPairingParser
 import org.kysecurity.authenticator.pairing.PushTokenProvider
-import org.kysecurity.authenticator.passkeys.SignOnPasskey
 import org.kysecurity.authenticator.passkeys.SignOnPasskeyKey
 import org.kysecurity.authenticator.passkeys.SignOnPasskeyStore
+import org.kysecurity.authenticator.passkeys.suppressesVaultPasskeys
 import org.kysecurity.authenticator.passwords.KdbxPasswordVault
 import org.kysecurity.authenticator.passwords.PasswordEntry
 import org.kysecurity.authenticator.passwords.PasswordGenerator
@@ -1020,6 +1020,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         val cards = mutableListOf<View>()
+        // Hoisted out of the loop: PairingStore wraps EncryptedSharedPreferences, which builds a
+        // Keystore-backed MasterKey. Constructing it once per card would be Keystore work on the
+        // UI thread on every render.
+        val pairedServerUrl = runCatching { PairingStore(this).account()?.serverUrl }.getOrNull()
         passwordEntries.sortedBy { it.title.lowercase() }.forEach { entry ->
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1046,9 +1050,12 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
 
-            val pairedServerUrl = PairingStore(this).account()?.serverUrl
+            // Badge exactly what the Credential Provider refuses to offer: suppressesVaultPasskeys
+            // is www-insensitive on both sides, unlike SignOnPasskey.isSignOnRpId, so a passkey
+            // suppressed from autofill must use the same predicate here or it looks merely broken
+            // instead of explained.
             val stranded = entry.passkey?.let {
-                SignOnPasskey.isSignOnRpId(it.rpId, pairedServerUrl)
+                suppressesVaultPasskeys(it.rpId, pairedServerUrl)
             } == true
             if (entry.isPasskey) {
                 headerRow.addView(TextView(this).apply {
