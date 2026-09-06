@@ -23,6 +23,10 @@ object KyPasswordVaultSync {
         File(directory, "password-vault-conflicts").listFiles()?.filter { it.name.endsWith(".tmp") }?.forEach { it.delete() }
     }
 
+    fun clearConflicts(directory: File) = synchronized(KdbxPasswordVault) {
+        File(directory, "password-vault-conflicts").deleteRecursively()
+    }
+
     // The caller holds this object's monitor through account lookup and acknowledgment too.
     fun sync(
         file: File,
@@ -45,7 +49,7 @@ object KyPasswordVaultSync {
         fun finished(result: Result): Result {
             synchronized(KdbxPasswordVault) {
                 if (isCurrent() && file.exists() && fingerprint(file.readBytes()) == result.fingerprint) {
-                    File(file.parentFile, "password-vault-conflicts").deleteRecursively()
+                    clearConflicts(checkNotNull(file.parentFile))
                 }
             }
             return result

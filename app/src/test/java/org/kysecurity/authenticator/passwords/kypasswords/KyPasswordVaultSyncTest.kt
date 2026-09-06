@@ -89,6 +89,8 @@ class KyPasswordVaultSyncTest {
             assertArrayEquals(before, file.readBytes())
             assertTrue(File(folder.root, "password-vault-conflicts").listFiles()!!.isNotEmpty())
             assertFalse(folder.root.listFiles()!!.any { it.name.startsWith(".vault-") })
+            KyPasswordVaultSync.clearConflicts(folder.root)
+            assertFalse(File(folder.root, "password-vault-conflicts").exists())
         } finally { server.stop(0) }
     }
 

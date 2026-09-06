@@ -1551,58 +1551,66 @@ class MainActivity : AppCompatActivity() {
                 renderContent()
             }
             .setPositiveButton("Unlock") { _, _ ->
-                val unlockGeneration = AppLockManager.lockGeneration
-                val secret = passwordInput.text.toString().trim()
+                val secret = passwordInput.text.toString()
                 if (secret.isBlank()) {
                     Toast.makeText(this, "Password is required", Toast.LENGTH_SHORT).show()
                     showUnlockKyPasswordsDialog(account, cachedMetadata)
                     return@setPositiveButton
                 }
-
-                val progressToast = Toast.makeText(this, "Unwrapping keyfile and loading vault…", Toast.LENGTH_SHORT)
-                progressToast.show()
-
-                Thread {
-                    try {
-                        val meta = cachedMetadata ?: kyPasswordClient.fetchMetadata(account.serverUrl, account.sessionToken)
-                        val envelope = meta.passwordEnvelope ?: meta.recoveryEnvelope
-                            ?: throw IllegalStateException("No key envelope found on server")
-
-                        val vaultKey = KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, secret)
-                        try {
-                            synchronized(KyPasswordVaultSync) {
-                                check(kyPasswordStore.account()?.sessionToken == account.sessionToken && (AppLockManager.isUnlocked() && AppLockManager.lockGeneration == unlockGeneration)) { "Vault session ended" }
-                                if (meta.version == 0L && !passwordVaultFile.exists()) {
-                                    KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, emptyList())
-                                }
-                                val result = KyPasswordVaultSync.sync(passwordVaultFile, vaultKey,
-                                    checkNotNull(kyPasswordStore.account()), kyPasswordClient,
-                                    { (AppLockManager.isUnlocked() && AppLockManager.lockGeneration == unlockGeneration) && kyPasswordStore.account()?.sessionToken == account.sessionToken })
-                                synchronized(AppLockManager) {
-                                    check(AppLockManager.lockGeneration == unlockGeneration) { "Vault session ended" }
-                                    AppLockManager.setPasswordVaultKey(this@MainActivity, vaultKey)
-                                    kyPasswordStore.updateSync(result.version, result.fingerprint)
-                                }
-                            }
-                        } finally {
-                            if (AppLockManager.getPasswordVaultKey() !== vaultKey) vaultKey.fill(0)
-                        }
-
-                        runOnUiThread {
-                            if (AppLockManager.getPasswordVaultKey() !== vaultKey) return@runOnUiThread
-                            loadPasswordEntries()
-                            Toast.makeText(this@MainActivity, "KyPasswords vault unlocked successfully", Toast.LENGTH_SHORT).show()
-                            renderContent()
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "Failed to unlock keyfile: ${e.message}", Toast.LENGTH_LONG).show()
-                            showUnlockKyPasswordsDialog(account, cachedMetadata)
-                        }
-                    }
-                }.start()
+                unlockKyPasswords(account, secret, cachedMetadata)
             }
             .showKyDialog()
+    }
+
+    private fun unlockKyPasswords(account: KyPasswordServerAccount, secret: String, cachedMetadata: KyPasswordMetadata?) {
+        val generation = AppLockManager.lockGeneration
+        Toast.makeText(this, "Unwrapping keyfile and loading vault…", Toast.LENGTH_SHORT).show()
+        Thread {
+            var candidateKey: ByteArray? = null
+            try {
+                val meta = cachedMetadata ?: kyPasswordClient.fetchMetadata(account.serverUrl, account.sessionToken)
+                val envelope = meta.passwordEnvelope ?: meta.recoveryEnvelope
+                    ?: error("No key envelope found on server")
+                val key = KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, secret)
+                candidateKey = key
+                fun current() = AppLockManager.lockGeneration == generation && AppLockManager.isUnlocked() &&
+                    kyPasswordStore.account()?.sessionToken == account.sessionToken
+                synchronized(KyPasswordVaultSync) {
+                    check(current()) { "Vault session ended" }
+                    synchronized(KdbxPasswordVault) {
+                        if (passwordVaultFile.exists()) KdbxPasswordVault.loadEntries(passwordVaultFile, key)
+                        else if (meta.version == 0L) KdbxPasswordVault.saveEntries(passwordVaultFile, key, emptyList())
+                        synchronized(AppLockManager) {
+                            check(current()) { "Vault session ended" }
+                            AppLockManager.setPasswordVaultKey(this@MainActivity, key)
+                        }
+                    }
+                    // A network/conflict error must not hide the resolution controls behind unlock.
+                    runCatching {
+                        KyPasswordVaultSync.sync(passwordVaultFile, key, checkNotNull(kyPasswordStore.account()),
+                            kyPasswordClient, { current() && AppLockManager.getPasswordVaultKey() === key })
+                    }.onSuccess { result ->
+                        if (current()) kyPasswordStore.updateSync(result.version, result.fingerprint)
+                    }.onFailure { error ->
+                        if (current()) kyPasswordStore.setSyncError(error.message ?: "Vault sync failed")
+                    }
+                }
+                runOnUiThread {
+                    if (!isDestroyed && current() && AppLockManager.getPasswordVaultKey() === key) {
+                        loadPasswordEntries()
+                        renderContent()
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (isDestroyed || generation != AppLockManager.lockGeneration || !AppLockManager.isUnlocked()) return@runOnUiThread
+                    Toast.makeText(this, "Failed to unlock keyfile: ${error.message}", Toast.LENGTH_LONG).show()
+                    showUnlockKyPasswordsDialog(account, cachedMetadata)
+                }
+            } finally {
+                if (AppLockManager.getPasswordVaultKey() !== candidateKey) candidateKey?.fill(0)
+            }
+        }.start()
     }
 
     private fun syncKyPasswordsVault(quiet: Boolean = false, resolution: KyPasswordVaultSync.Resolution? = null) {
@@ -1682,7 +1690,12 @@ class MainActivity : AppCompatActivity() {
                 kyPasswordStore.clear()
                 AppLockManager.clearPasswordVaultKey(this)
                 passwordEntries.clear()
-                passwordVaultFile.delete()
+                Thread {
+                    synchronized(KdbxPasswordVault) {
+                        passwordVaultFile.delete()
+                        KyPasswordVaultSync.clearConflicts(filesDir)
+                    }
+                }.start()
                 Toast.makeText(this, "KyPasswords server unpaired", Toast.LENGTH_SHORT).show()
                 renderContent()
             }
