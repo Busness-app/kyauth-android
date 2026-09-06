@@ -117,4 +117,39 @@ class VaultUiTest {
             }
         }
     }
+
+    @Test fun reuseReportRefreshesWithoutDisplayingPasswords() {
+        val duplicate = entry.copy(id = java.util.UUID.randomUUID().toString(), title = "Duplicate")
+        KdbxPasswordVault.update(file, key) { it.add(duplicate); true }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { invoke(it, "showReusedPasswords") }
+            awaitDialog(scenario, "This password is used by 2 live entries.")
+            scenario.onActivity { activity ->
+                assertFalse(dialogs(activity).flatMap { texts(checkNotNull(it.window).decorView) }
+                    .any { it.text.toString() == "fixture secret" })
+            }
+            KdbxPasswordVault.delete(file, key, duplicate.id)
+            scenario.onActivity { invoke(it, "loadPasswordEntries") }
+            awaitDialog(scenario, "No reused passwords found.")
+        }
+    }
+
+    @Test fun expiredInputLocksAndClearsAnUnsavedPasswordForm() {
+        context.getSharedPreferences("app_lock", Context.MODE_PRIVATE).edit().putInt("idle_lock_minutes", 5).commit()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                invoke(activity, "showAddPasswordDialog")
+                val dialog = dialogs(activity).single()
+                val input = texts(checkNotNull(dialog.window).decorView).filterIsInstance<android.widget.EditText>()
+                    .single { it.hint.toString() == "Password" }
+                input.setText("unsaved fixture secret")
+                AppLockManager.idleLock.reset()
+                AppLockManager.idleLock.activity(android.os.SystemClock.elapsedRealtime() - 300_001, 300_000)
+                assertEquals(false, invoke(activity, "recordVaultActivity"))
+                assertFalse(AppLockManager.isUnlocked())
+                assertFalse(dialog.isShowing)
+                assertEquals("", input.text.toString())
+            }
+        }
+    }
 }

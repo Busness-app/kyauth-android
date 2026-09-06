@@ -35,6 +35,16 @@ object KdbxPasswordVault {
         entry.fields[BasicField.UserName.key]?.content.orEmpty(), entry.fields[PasskeyData.FIELD_RP_ID] != null,
     )
 
+    data class ReusedPassword(val entry: EntrySummary, val count: Int)
+
+    /** Compare all live records, independently of password-card display filtering. */
+    @Synchronized
+    fun reusedPasswords(file: File, key: ByteArray): List<ReusedPassword> = records(read(file, key))
+        .filter { !it.fields[BasicField.Password.key]?.content.isNullOrEmpty() }
+        .groupBy { it.fields[BasicField.Password.key]!!.content }
+        .values.filter { it.size > 1 }
+        .flatMap { matches -> matches.map { ReusedPassword(summarize(it), matches.size) } }
+
     @Synchronized
     fun recycledEntries(file: File, key: ByteArray): List<EntrySummary> =
         records(read(file, key), recycled = true).map(::summarize)

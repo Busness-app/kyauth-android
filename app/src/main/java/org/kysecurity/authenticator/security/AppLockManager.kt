@@ -57,6 +57,8 @@ object AppLockManager {
     var lockGeneration: Long = 0L
         private set
 
+    val idleLock = IdleLock()
+
     fun isUnlocked(): Boolean = isUnlocked
 
     fun getVaultKey(): ByteArray? = if (isUnlocked) activeVaultKey else null
@@ -66,6 +68,7 @@ object AppLockManager {
     @Synchronized
     fun lock() {
         lockGeneration++
+        idleLock.reset()
         isUnlocked = false
         activeVaultKey?.fill(0)
         activeVaultKey = null

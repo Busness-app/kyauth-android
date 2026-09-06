@@ -119,6 +119,23 @@ class KdbxPreservationTest {
         assertTrue(KdbxPasswordVault.decode(file.readBytes(), key).content.group.entries.single { it.uuid.toString() == passkey.id }.history.isEmpty())
     }
 
+    @Test fun reuseIsExactAndIncludesWhitespaceButExcludesAllRecycledRecords() {
+        val file = fixture()
+        val matches = KdbxPasswordVault.reusedPasswords(file, key)
+        assertEquals(setOf("Edit me", "Live namesake", "Spaces one", "Spaces two"), matches.map { it.entry.title }.toSet())
+        assertTrue(matches.all { it.count == 2 })
+        val id = matches.first { it.entry.title == "Spaces one" }.entry.id
+        KdbxPasswordVault.delete(file, key, id)
+        assertFalse(KdbxPasswordVault.reusedPasswords(file, key).any { it.entry.title.startsWith("Spaces") })
+        KdbxPasswordVault.restore(file, key, id)
+        assertEquals(2, KdbxPasswordVault.reusedPasswords(file, key).count { it.entry.title.startsWith("Spaces") })
+        // The report also includes valid nonempty passwords on untitled records.
+        KdbxPasswordVault.update(file, key) { entries ->
+            entries.add(PasswordEntry("Hidden match", "", "hidden password")); true
+        }
+        assertTrue(KdbxPasswordVault.reusedPasswords(file, key).any { it.entry.title == "Untitled entry" && it.count == 2 })
+    }
+
     @Test fun webFixtureSurvivesAndroidMutation() {
         val output = File("build/interop").apply { mkdirs() }
         val original = checkNotNull(this@KdbxPreservationTest.javaClass.getResourceAsStream("/vault-preservation.kdbx")).use { it.readBytes() }
