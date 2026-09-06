@@ -15,8 +15,14 @@ adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
 adb("shell", "input", "keyevent", "KEYCODE_MENU")
 deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
-    adb("shell", "uiautomator", "dump", "/sdcard/ci-unlock.xml")
-    root = ET.fromstring(adb("exec-out", "cat", "/sdcard/ci-unlock.xml"))
+    adb("shell", "input", "keyevent", "KEYCODE_MENU")
+    try:
+        adb("shell", "uiautomator", "dump", "/sdcard/ci-unlock.xml")
+        root = ET.fromstring(adb("exec-out", "cat", "/sdcard/ci-unlock.xml"))
+    except (ET.ParseError, subprocess.CalledProcessError):
+        # SystemUI can return no accessibility root while the screen is waking.
+        time.sleep(1)
+        continue
     if any(node.get("resource-id") == "com.android.systemui:id/pinEntry"
            and node.get("focused") == "true" for node in root.iter("node")):
         break
