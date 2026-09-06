@@ -46,13 +46,5 @@ jobs:
             adb shell input keyevent KEYCODE_WAKEUP
             adb shell wm dismiss-keyguard
             adb shell locksettings set-pin 246810
-            adb shell input keyevent KEYCODE_SLEEP
-            sleep 1
-            adb shell input keyevent KEYCODE_WAKEUP
-            adb shell input keyevent KEYCODE_MENU
-            sleep 1
-            adb shell input text 246810
-            adb shell input keyevent KEYCODE_ENTER
-            sleep 1
-            adb shell dumpsys window policy | grep -q 'showing=false'
+            python3 tools/unlock_test_emulator.py
             ./gradlew connectedDebugAndroidTest
