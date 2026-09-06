@@ -86,6 +86,10 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   Passwords can export those files; revealing their opening key uses the existing authenticated offline-key flow. Local wipe
   removes the conflict files along with all app-private files.
 - The Passwords tab supports pairing with KyPasswords, syncing vaults, local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
+- The Passwords Recycle Bin is a metadata-only deleted-entry view, including descendants and
+  untitled/non-password records. Restore moves the intact original entry to the live root; it
+  preserves the UUID and all contents. There is no purge action. App lock clears and dismisses
+  open dialogs, including unsaved forms and revealed secrets.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
 
 ## UI contract

@@ -52,6 +52,26 @@ class KdbxPreservationTest {
         assertTrue(after.content.deletedObjects.any { it.id.toString() == id })
     }
 
+    @Test fun restoreKeepsContentsAndUuidIncludingEntriesOutsideThePasswordProjection() {
+        val file = fixture()
+        val original = KdbxPasswordVault.decode(file.readBytes(), key)
+        val bin = original.content.group.findChildGroup { it.uuid == original.content.meta.recycleBinUuid }!!.second
+        val child = bin.groups.single().entries.first { it.fields["Title"]?.content == "Deleted child" }
+        val deleted = KdbxPasswordVault.recycledEntries(file, key)
+        assertTrue(deleted.any { it.title == "Untitled entry" })
+        KdbxPasswordVault.restore(file, key, child.uuid.toString())
+        val restored = KdbxPasswordVault.decode(file.readBytes(), key).content.group.entries.single { it.uuid == child.uuid }
+        assertEquals(child.fields.entries.associate { it.key to it.value.content }, restored.fields.entries.associate { it.key to it.value.content })
+        assertEquals(child.history, restored.history)
+        assertEquals(child.binaries, restored.binaries)
+        assertTrue(KdbxPasswordVault.loadEntries(file, key).any { it.id == child.uuid.toString() })
+        assertEquals(deleted.size - 1, KdbxPasswordVault.recycledEntries(file, key).size)
+        assertThrows(IllegalArgumentException::class.java) { KdbxPasswordVault.restore(file, key, child.uuid.toString()) }
+        val hidden = KdbxPasswordVault.recycledEntries(file, key).first { it.title == "Untitled entry" }
+        KdbxPasswordVault.restore(file, key, hidden.id)
+        assertTrue(KdbxPasswordVault.decode(file.readBytes(), key).content.group.entries.any { it.uuid.toString() == hidden.id })
+    }
+
     @Test fun invalidInputAndCreationOverExistingFilesLeaveOriginalBytesAlone() {
         val file = fixture()
         val before = file.readBytes()
@@ -113,5 +133,12 @@ class KdbxPreservationTest {
         val reloaded = KeePassDatabase.decode(edited.inputStream(), Credentials.from(EncryptedValue.fromString(hex)))
         assertEquals(database.content.group.groups.map { it.uuid }, reloaded.content.group.groups.map { it.uuid })
         assertFalse(KdbxPasswordVault.loadEntries(edited, key).any { it.title.startsWith("Recycled") || it.title == "Deleted child" })
+        val recovered = File(output, "recovered.kdbx").apply { writeBytes(original) }
+        listOf("Edit me", "Live namesake").forEach { title ->
+            val id = KdbxPasswordVault.loadEntries(recovered, key).single { it.title == title }.id
+            KdbxPasswordVault.delete(recovered, key, id)
+        }
+        val child = KdbxPasswordVault.recycledEntries(recovered, key).single { it.title == "Deleted child" }
+        KdbxPasswordVault.restore(recovered, key, child.id)
     }
 }

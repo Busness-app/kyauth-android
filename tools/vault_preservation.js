@@ -92,6 +92,25 @@ async function verify(directory) {
   changed.history = original.history;
   changed.times = original.times;
   assert.deepEqual(summary(after), summary(before), 'Android edit preserves unrelated data');
+  const recovered = await open(path.join(directory, 'recovered.kdbx'));
+  const find = (db, title) => [...db.getDefaultGroup().allEntries()].find(e => text(e.fields.get('Title')) === title);
+  const binId = before.meta.recycleBinUuid.toString();
+  assert.equal(recovered.meta.recycleBinUuid.toString(), binId);
+  for (const title of ['Edit me', 'Live namesake']) {
+    const e = find(recovered, title);
+    assert.equal(e.parentGroup.uuid.toString(), binId);
+    const old = find(before, title);
+    assert.deepEqual({ ...entry(e), times: entry(old).times }, entry(old));
+  }
+  const restoredChild = find(recovered, 'Deleted child');
+  assert.equal(restoredChild.parentGroup.uuid.toString(), recovered.getDefaultGroup().uuid.toString());
+  const oldChild = find(before, 'Deleted child');
+  assert.deepEqual({ ...entry(restoredChild), times: entry(oldChild).times }, entry(oldChild));
+  // Android deletion is recoverable through the actual web-library move/save path too.
+  recovered.move(find(recovered, 'Edit me'), recovered.getDefaultGroup());
+  const webRestored = await k.Kdbx.load(await recovered.save(), credentials());
+  assert.equal(find(webRestored, 'Edit me').parentGroup.uuid.toString(), webRestored.getDefaultGroup().uuid.toString());
+  assert.equal(find(webRestored, 'Live namesake').parentGroup.uuid.toString(), binId);
   console.log('Verified kdbxweb → kotpass → kdbxweb: no-op and targeted edit.');
 }
 (process.argv[2] === 'generate' ? generate() : verify(process.argv[2])).catch(e => { console.error(e); process.exitCode = 1; });

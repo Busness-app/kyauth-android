@@ -27,6 +27,26 @@ import org.kysecurity.authenticator.security.writeAtomically
 object KdbxPasswordVault {
     private const val MAX_VAULT_BYTES = 25L * 1024 * 1024
 
+    /** Metadata only: even records without a title or password can be recovered. */
+    data class EntrySummary(val id: String, val title: String, val username: String, val isPasskey: Boolean)
+
+    private fun summarize(entry: Entry) = EntrySummary(
+        entry.uuid.toString(), entry.fields[BasicField.Title.key]?.content.orEmpty().ifBlank { "Untitled entry" },
+        entry.fields[BasicField.UserName.key]?.content.orEmpty(), entry.fields[PasskeyData.FIELD_RP_ID] != null,
+    )
+
+    @Synchronized
+    fun recycledEntries(file: File, key: ByteArray): List<EntrySummary> =
+        records(read(file, key), recycled = true).map(::summarize)
+
+    @Synchronized
+    fun restore(file: File, key: ByteArray, id: String) {
+        val database = read(file, key)
+        val uuid = UUID.fromString(id)
+        require(records(database, recycled = true).any { it.uuid == uuid }) { "Entry is not in the recycle bin" }
+        write(file, database.moveEntry(uuid, database.content.group.uuid))
+    }
+
     internal fun decode(bytes: ByteArray, key: ByteArray): KeePassDatabase {
         require(bytes.isNotEmpty() && bytes.size <= MAX_VAULT_BYTES) { "Invalid password vault size" }
         val credentials = Credentials.from(EncryptedValue.fromString(key.joinToString("") { "%02x".format(it) }))

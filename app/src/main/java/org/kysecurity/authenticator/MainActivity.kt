@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
     private val kyPasswordClient by lazy { KyPasswordClient() }
     private val executor: Executor by lazy { ContextCompat.getMainExecutor(this) }
     private val handler = Handler(Looper.getMainLooper())
+    private val openDialogs = mutableSetOf<AlertDialog>()
 
     private var activeTab = Tab.TOTP
     private var pendingChallenge: MfaChallenge? = null
@@ -1022,6 +1023,10 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(headerActions, fullWidthParams(bottom = 16))
 
+        container.addView(secondaryButton("Recycle Bin").apply {
+            setOnClickListener { showRecycleBin() }
+        }, fullWidthParams(bottom = 12))
+
         val conflictFiles = File(filesDir, "password-vault-conflicts").listFiles()?.filter { it.extension == "kdbx" }.orEmpty()
         if (conflictFiles.isNotEmpty()) {
             container.addView(primaryButton("Resolve vault conflict").apply {
@@ -1146,6 +1151,33 @@ class MainActivity : AppCompatActivity() {
             cards.add(card)
         }
         addAdaptiveCards(container, cards)
+    }
+
+    private fun showRecycleBin() {
+        val key = AppLockManager.getPasswordVaultKey() ?: return
+        runCatching { KdbxPasswordVault.recycledEntries(passwordVaultFile, key) }.onSuccess { entries ->
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+            var dialog: AlertDialog? = null
+            if (entries.isEmpty()) list.addView(message("Recycle Bin is empty."))
+            entries.sortedBy { it.title.lowercase() }.forEach { entry ->
+                val card = settingsCard()
+                card.addView(title(entry.title))
+                card.addView(message(listOfNotNull(entry.username.takeIf { it.isNotEmpty() },
+                    if (entry.isPasskey) "Passkey" else null).joinToString(" · ")))
+                card.addView(secondaryButton("Restore to vault").apply {
+                    setOnClickListener {
+                        val currentKey = AppLockManager.getPasswordVaultKey() ?: return@setOnClickListener
+                        dialog?.dismiss()
+                        mutatePasswords { KdbxPasswordVault.restore(passwordVaultFile, currentKey, entry.id) }
+                        showRecycleBin()
+                    }
+                }, fullWidthParams(top = 8))
+                list.addView(card, fullWidthParams(bottom = 8))
+            }
+            dialog = AlertDialog.Builder(this).setTitle("Recycle Bin")
+                .setView(ScrollView(this).apply { addView(list) })
+                .setPositiveButton("Done", null).showKyDialog()
+        }.onFailure { Toast.makeText(this, "Could not read Recycle Bin: ${it.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun createLocalPasswordVault() {
@@ -2447,6 +2479,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun AlertDialog.Builder.showKyDialog(): AlertDialog {
         return create().apply {
+            openDialogs.add(this)
+            setOnDismissListener { openDialogs.remove(this) }
             val background = GradientDrawable().apply {
                 setColor(ThemeManager.color(this@MainActivity, R.color.ky_surface))
                 setStroke(dp(1), ThemeManager.color(this@MainActivity, R.color.ky_border))
@@ -2568,8 +2602,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun lockSensitiveState() {
         AppLockManager.lock()
+        openDialogs.toList().forEach { dialog ->
+            fun clear(view: View) {
+                if (view is TextView) view.text = ""
+                if (view is ViewGroup) for (index in 0 until view.childCount) clear(view.getChildAt(index))
+            }
+            dialog.window?.decorView?.let(::clear)
+            dialog.dismiss()
+        }
         totpEntries.clear()
         passwordEntries.clear()
+        totpViews.clear()
         copiedSensitiveLabel?.let { label ->
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             if (clipboard.primaryClipDescription?.label == label) clipboard.clearPrimaryClip()
