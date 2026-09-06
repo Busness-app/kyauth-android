@@ -1788,17 +1788,20 @@ class MainActivity : AppCompatActivity() {
             .setMessage("Are you sure you want to unpair from KyPasswords? This will remove the local password keyfile and lock the password vault.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Unpair") { _, _ ->
-                kyPasswordStore.clear()
-                AppLockManager.clearPasswordVaultKey(this)
-                passwordEntries.clear()
                 Thread {
                     synchronized(KdbxPasswordVault) {
+                        kyPasswordStore.clear()
+                        AppLockManager.clearPasswordVaultKey(this)
                         passwordVaultFile.delete()
                         KyPasswordVaultSync.clearConflicts(filesDir)
                     }
+                    runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
+                        passwordEntries.clear()
+                        Toast.makeText(this, "KyPasswords server unpaired", Toast.LENGTH_SHORT).show()
+                        renderContent()
+                    }
                 }.start()
-                Toast.makeText(this, "KyPasswords server unpaired", Toast.LENGTH_SHORT).show()
-                renderContent()
             }
             .showKyDialog()
     }

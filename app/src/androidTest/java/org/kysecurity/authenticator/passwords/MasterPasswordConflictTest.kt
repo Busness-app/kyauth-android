@@ -89,6 +89,27 @@ class MasterPasswordConflictTest {
                 assertNotNull(AppLockManager.getPasswordVaultKey())
                 assertNotNull(store.account()?.lastSyncError)
                 assertEquals("Local", KdbxPasswordVault.loadEntries(file, key).single().title)
+                // A pending teardown must not expose device-only creation before deleting old files.
+                synchronized(KdbxPasswordVault) {
+                    scenario.onActivity { activity ->
+                        MainActivity::class.java.getDeclaredMethod("confirmUnpairKyPasswords")
+                            .apply { isAccessible = true }.invoke(activity)
+                        @Suppress("UNCHECKED_CAST")
+                        val dialogs = MainActivity::class.java.getDeclaredField("openDialogs")
+                            .apply { isAccessible = true }.get(activity) as Set<androidx.appcompat.app.AlertDialog>
+                        dialogs.single().getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
+                    }
+                    assertNotNull("Account stays paired until serialized teardown can run", store.account())
+                    assertNotNull("Key stays paired until serialized teardown can run", AppLockManager.getPasswordVaultKey())
+                }
+                val unpairDeadline = SystemClock.elapsedRealtime() + 30_000
+                while (store.account() != null && SystemClock.elapsedRealtime() < unpairDeadline) Thread.sleep(25)
+                synchronized(KdbxPasswordVault) {
+                    assertNull(store.account())
+                    assertNull(AppLockManager.getPasswordVaultKey())
+                    assertFalse(file.exists())
+                    assertFalse(File(context.filesDir, "password-vault-conflicts").exists())
+                }
             }
         } finally {
             server.close(); worker.join(1000)

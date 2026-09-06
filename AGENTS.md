@@ -81,7 +81,8 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   Byte-identical local/remote files establish a missing baseline on upgrade. Explicit resolution
   chooses the whole device or server vault, guarded by If-Match and local-change detection.
   Clean successful syncs and unpairing remove conflict copies; startup/sync sweeps interrupted
-  snapshots. A validated master-password key is adopted before sync, so network errors leave
+  snapshots. Unpair clears the account, key and files in one vault transaction, so a new local
+  vault cannot overtake teardown. A validated master-password key is adopted before sync, so network errors leave
   local access and conflict resolution available.
   Passwords can export those files; revealing their opening key uses the existing authenticated offline-key flow. Local wipe
   removes the conflict files along with all app-private files.
