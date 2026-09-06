@@ -14,7 +14,13 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle
-      - run: ./gradlew test assembleDebug lintDebug
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --prefix tools --ignore-scripts
+      - run: pip install argon2-cffi==25.1.0
+      - run: ./gradlew test assembleDebug lintDebug compileDebugAndroidTestSources
+      - run: node tools/vault_preservation.js app/build/interop
 
   device:
     runs-on: ubuntu-latest

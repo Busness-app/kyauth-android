@@ -12,6 +12,7 @@ data class KyPasswordServerAccount(
     val vaultVersion: Long = 0L,
     val lastSyncedEpoch: Long = 0L,
     val lastSyncError: String? = null,
+    val lastSyncedFingerprint: String? = null,
 )
 
 class KyPasswordStore(context: Context) {
@@ -31,7 +32,8 @@ class KyPasswordStore(context: Context) {
         val vaultVersion = preferences.getLong("vault_version", 0L)
         val lastSyncedEpoch = preferences.getLong("last_synced_epoch", 0L)
         val lastSyncError = preferences.getString("last_sync_error", null)
-        return KyPasswordServerAccount(serverUrl, deviceId, sessionToken, userId, vaultVersion, lastSyncedEpoch, lastSyncError)
+        return KyPasswordServerAccount(serverUrl, deviceId, sessionToken, userId, vaultVersion, lastSyncedEpoch, lastSyncError,
+            preferences.getString("last_synced_fingerprint", null))
     }
 
     fun save(account: KyPasswordServerAccount) {
@@ -43,13 +45,15 @@ class KyPasswordStore(context: Context) {
             .putLong("vault_version", account.vaultVersion)
             .putLong("last_synced_epoch", account.lastSyncedEpoch)
             .putString("last_sync_error", account.lastSyncError)
+            .putString("last_synced_fingerprint", account.lastSyncedFingerprint)
             .apply()
     }
 
-    fun updateSync(vaultVersion: Long, lastSyncedEpoch: Long = System.currentTimeMillis() / 1000) {
+    fun updateSync(vaultVersion: Long, fingerprint: String, lastSyncedEpoch: Long = System.currentTimeMillis() / 1000) {
         preferences.edit()
             .putLong("vault_version", vaultVersion)
             .putLong("last_synced_epoch", lastSyncedEpoch)
+            .putString("last_synced_fingerprint", fingerprint)
             .remove("last_sync_error")
             .apply()
     }
@@ -68,6 +72,7 @@ class KyPasswordStore(context: Context) {
             .remove("user_id")
             .remove("vault_version")
             .remove("last_synced_epoch")
+            .remove("last_synced_fingerprint")
             .remove("last_sync_error")
             .apply()
     }

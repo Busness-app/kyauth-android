@@ -4,6 +4,7 @@ import org.json.JSONObject
 import org.kysecurity.authenticator.pairing.PairingEndpoint
 import java.io.ByteArrayOutputStream
 import java.io.File
+import org.kysecurity.authenticator.security.writeAtomically
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -189,8 +190,8 @@ class KyPasswordClient {
                 ?: connection.getHeaderField("ETag")?.trim('"', ' ')
             val version = versionHeader?.toLongOrNull() ?: 1L
 
-            val tempFile = File(targetFile.parentFile, ".${targetFile.name}.download")
-            tempFile.parentFile?.mkdirs()
+            targetFile.parentFile?.mkdirs()
+            val tempFile = File.createTempFile(".${targetFile.name}", ".download", targetFile.parentFile)
             try {
                 connection.inputStream.use { input ->
                     FileOutputStream(tempFile).use { output ->
@@ -202,12 +203,10 @@ class KyPasswordClient {
                 throw e
             }
 
-            if (!tempFile.renameTo(targetFile)) {
-                targetFile.delete()
-                if (!tempFile.renameTo(targetFile)) {
-                    tempFile.copyTo(targetFile, overwrite = true)
-                    tempFile.delete()
-                }
+            try {
+                writeAtomically(targetFile, tempFile.readBytes())
+            } finally {
+                tempFile.delete()
             }
 
             return version

@@ -68,7 +68,9 @@ async function main() {
   console.log(`wrote ${out} (${fs.statSync(out).size} bytes), vault key ${VAULT_KEY_HEX}`);
 }
 
-main().catch((error) => {
+module.exports = { kdbxweb, VAULT_KEY_HEX };
+
+if (require.main === module) main().catch((error) => {
   console.error(error);
   process.exit(1);
 });

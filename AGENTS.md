@@ -66,9 +66,18 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   arbitrary app would hand one site's credential to another.
 - Password fill matches an entry's domain or its subdomains, never a parent or sibling, and never
   across a public suffix. Passkey matching is exact on RP ID.
-- Every incremental vault mutation goes through `KdbxPasswordVault.update`, one serialized
-  read-modify-write. `loadEntries` throws on a vault it cannot decode; callers must never turn that
-  into an empty list.
+- Incremental password/passkey edits use `KdbxPasswordVault.update`; delete uses its serialized
+  `delete` operation. Both mutate the decoded KDBX by UUID, retaining groups, unknown fields,
+  attachments, history and metadata. `saveEntries` only creates a new file. Existing empty or
+  unreadable files fail closed. Live reads exclude the metadata-identified recycle bin and its
+  descendants. Disabled recycling requires explicit permanent-delete confirmation.
+- `KyPasswordVaultSync` serializes sync sessions and uploads immutable encrypted snapshots.
+  Downloads are decoded before installation under the local vault monitor. A remote replacement
+  requires an unchanged local file and a known clean sync fingerprint. Unknown or dirty state,
+  concurrent local writes and HTTP 409 preserve encrypted versions in `password-vault-conflicts`
+  and surface a conflict; they never merge UI projections or automatically overwrite either side.
+  Passwords can export those files; revealing their opening key uses the existing authenticated offline-key flow. Local wipe
+  removes the conflict files along with all app-private files.
 - The Passwords tab supports pairing with KyPasswords, syncing vaults, local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
 
@@ -111,7 +120,13 @@ Run unit tests, lint, the debug build, and compile device tests:
 
 ```bash
 ./gradlew test lintDebug assembleDebug compileDebugAndroidTestSources
+npm ci --prefix tools --ignore-scripts
+pip install argon2-cffi==25.1.0
+node tools/vault_preservation.js app/build/interop
 ```
+
+`KdbxPreservationTest` writes the Android round-trip outputs consumed by the Node verifier.
+Regenerate the fake-secret rich fixtures with `node tools/vault_preservation.js generate`.
 
 ## Outstanding security work
 

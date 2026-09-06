@@ -91,7 +91,7 @@ data class PasswordEntry(
 ) {
     init {
         require(title.isNotBlank()) { "title must not be blank" }
-        require(password.isNotBlank() || passkey != null) { "entry must have a password or a passkey" }
+        require(password.isNotEmpty() || passkey != null) { "entry must have a password or a passkey" }
     }
 
     val isPasskey: Boolean get() = passkey != null
