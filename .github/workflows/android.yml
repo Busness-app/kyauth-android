@@ -14,7 +14,13 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle
-      - run: ./gradlew test assembleDebug lintDebug
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --prefix tools --ignore-scripts
+      - run: pip install argon2-cffi==25.1.0
+      - run: ./gradlew test assembleDebug lintDebug compileDebugAndroidTestSources
+      - run: node tools/vault_preservation.js app/build/interop
 
   device:
     runs-on: ubuntu-latest
@@ -33,7 +39,14 @@ jobs:
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
+          target: google_apis
+          profile: pixel_6
           arch: x86_64
           script: |
+            adb shell settings put system screen_off_timeout 2147483647
+            adb shell svc power stayon true
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell wm dismiss-keyguard
             adb shell locksettings set-pin 246810
+            python3 tools/unlock_test_emulator.py
             ./gradlew connectedDebugAndroidTest

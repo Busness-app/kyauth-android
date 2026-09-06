@@ -71,7 +71,9 @@ import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordMetadata
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordPairing
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordPairingParser
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordServerAccount
+import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordVaultSync
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordStore
+import org.kysecurity.authenticator.security.IdleLock
 import org.kysecurity.authenticator.security.AppLockManager
 import org.kysecurity.authenticator.security.CredentialCipher
 import org.kysecurity.authenticator.security.VaultUnlockPrompt
@@ -94,11 +96,34 @@ import kotlin.math.min
 private const val STATE_ACTIVE_TAB = "active_tab"
 
 class MainActivity : AppCompatActivity() {
+    private var pendingConflictExport: List<File> = emptyList()
+    private val exportConflicts = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        val files = pendingConflictExport
+        pendingConflictExport = emptyList()
+        if (uri != null && files.isNotEmpty()) runCatching {
+            java.util.zip.ZipOutputStream(checkNotNull(contentResolver.openOutputStream(uri))).use { zip ->
+                files.forEach { file ->
+                    zip.putNextEntry(java.util.zip.ZipEntry(file.name))
+                    file.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
+            }
+        }.onFailure { Toast.makeText(this, "Could not export conflict vaults", Toast.LENGTH_LONG).show() }
+    }
     private lateinit var store: PairingStore
     private val kyPasswordStore by lazy { KyPasswordStore(this) }
     private val kyPasswordClient by lazy { KyPasswordClient() }
     private val executor: Executor by lazy { ContextCompat.getMainExecutor(this) }
     private val handler = Handler(Looper.getMainLooper())
+    private val openDialogs = mutableSetOf<AlertDialog>()
+    private var vaultReportDialog: AlertDialog? = null
+    private var vaultReportRequest = 0L
+    private var refreshVaultReport: (() -> Unit)? = null
+    private val idlePreferences by lazy { getSharedPreferences("app_lock", MODE_PRIVATE) }
+    private fun idleMinutes() = IdleLock.validatedMinutes(idlePreferences.getInt("idle_lock_minutes", 5))
+    private fun idleTimeoutMillis() = idleMinutes() * 60_000L
 
     private var activeTab = Tab.TOTP
     private var pendingChallenge: MfaChallenge? = null
@@ -107,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     private var passwordEntries = mutableListOf<PasswordEntry>()
     private var copiedSensitiveLabel: String? = null
     private var isVaultLoading = false
+    private var vaultLoadGeneration: Long? = null
     private data class TotpViews(
         val entry: TotpEntry,
         val code: TextView,
@@ -119,6 +145,10 @@ class MainActivity : AppCompatActivity() {
 
     private val ticker = object : Runnable {
         override fun run() {
+            if (AppLockManager.isUnlocked() && AppLockManager.idleLock.expired(android.os.SystemClock.elapsedRealtime(), idleTimeoutMillis())) {
+                lockSensitiveState()
+                renderContent()
+            }
             if (!isVaultLoading && AppLockManager.isUnlocked() && activeTab == Tab.TOTP) {
                 updateTotpViews()
             }
@@ -139,6 +169,7 @@ class MainActivity : AppCompatActivity() {
         store = PairingStore(this)
         KyAuthMessagingService.ensureChannel(this)
         handler.post(ticker)
+        Thread { KyPasswordVaultSync.clearInterruptedSnapshots(filesDir) }.start()
     }
 
     override fun onResume() {
@@ -156,12 +187,38 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) lockSensitiveState()
+        if (!isChangingConfigurations) {
+            lockSensitiveState()
+            renderContent()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(ticker)
+        vaultLoadGeneration = null
+        dismissSensitiveDialogs()
+        passwordEntries.clear()
+        totpEntries.clear()
+        totpViews.clear()
+    }
+
+    private fun recordVaultActivity(): Boolean {
+        if (!AppLockManager.isUnlocked()) return true
+        if (AppLockManager.idleLock.activity(android.os.SystemClock.elapsedRealtime(), idleTimeoutMillis())) return true
+        lockSensitiveState()
+        renderContent()
+        return false
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.action == android.view.MotionEvent.ACTION_DOWN && !recordVaultActivity()) return true
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN && !recordVaultActivity()) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -891,31 +948,41 @@ class MainActivity : AppCompatActivity() {
         KdbxTotpVault.saveEntries(vaultFile, vaultKey, totpEntries)
     }
 
-    private fun loadPasswordEntries() {
-        val vaultKey = AppLockManager.getPasswordVaultKey() ?: return
-        passwordEntries = KdbxPasswordVault.loadEntries(passwordVaultFile, vaultKey).toMutableList()
+    private fun <T> readPasswordVault(operation: (ByteArray) -> T, onSuccess: (T) -> Unit) {
+        val key = AppLockManager.getPasswordVaultKey() ?: return
+        Thread {
+            val result = runCatching {
+                check(AppLockManager.getPasswordVaultKey() === key) { "Vault session ended" }
+                operation(key)
+            }
+            runOnUiThread {
+                if (isDestroyed || AppLockManager.getPasswordVaultKey() !== key) return@runOnUiThread
+                result.onSuccess(onSuccess).onFailure {
+                    Toast.makeText(this, "Password vault operation failed: ${it.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
-    private fun savePasswordEntries(syncToRemote: Boolean = true) {
-        val vaultKey = AppLockManager.getPasswordVaultKey() ?: return
-        KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, passwordEntries)
-        if (syncToRemote) {
-            val account = kyPasswordStore.account()
-            if (account != null) {
-                Thread {
-                    runCatching {
-                        val newVersion = kyPasswordClient.uploadVault(
-                            serverUrl = account.serverUrl,
-                            sessionToken = account.sessionToken,
-                            vaultFile = passwordVaultFile,
-                            expectedVersion = account.vaultVersion,
-                            deviceId = account.deviceId,
-                        )
-                        kyPasswordStore.updateSync(newVersion)
-                    }
-                }.start()
-            }
-        }
+    private fun loadPasswordEntries() {
+        readPasswordVault(operation = { KdbxPasswordVault.loadEntries(passwordVaultFile, it) }, onSuccess = {
+            passwordEntries = it.toMutableList()
+            renderContent()
+            if (vaultReportDialog?.isShowing == true) refreshVaultReport?.invoke()
+        })
+    }
+
+    private fun mutatePasswords(afterSave: () -> Unit = {}, mutation: () -> Unit) {
+        readPasswordVault(operation = { key ->
+            mutation()
+            KdbxPasswordVault.loadEntries(passwordVaultFile, key)
+        }, onSuccess = { entries ->
+            passwordEntries = entries.toMutableList()
+            renderContent()
+            if (vaultReportDialog?.isShowing == true) refreshVaultReport?.invoke()
+            afterSave()
+            if (kyPasswordStore.account() != null) syncKyPasswordsVault(quiet = true)
+        })
     }
 
     private fun addTotpEntry(entry: TotpEntry) {
@@ -995,6 +1062,30 @@ class MainActivity : AppCompatActivity() {
             headerActions.addView(syncButton)
         }
         container.addView(headerActions, fullWidthParams(bottom = 16))
+
+        container.addView(secondaryButton("Recycle Bin").apply {
+            setOnClickListener { showRecycleBin() }
+        }, fullWidthParams(bottom = 12))
+
+        container.addView(secondaryButton("Reused passwords").apply {
+            setOnClickListener { showReusedPasswords() }
+        }, fullWidthParams(bottom = 12))
+
+        val conflictFiles = File(filesDir, "password-vault-conflicts").listFiles()?.filter { it.extension == "kdbx" }.orEmpty()
+        if (conflictFiles.isNotEmpty()) {
+            container.addView(primaryButton("Resolve vault conflict").apply {
+                setOnClickListener { showResolveVaultConflict() }
+            }, fullWidthParams(bottom = 8))
+            container.addView(secondaryButton("Export conflict vaults").apply {
+                setOnClickListener {
+                    pendingConflictExport = conflictFiles
+                    exportConflicts.launch("KyAuth-conflict-vaults.zip")
+                }
+            }, fullWidthParams(bottom = 8))
+            container.addView(secondaryButton("Reveal offline vault key").apply {
+                setOnClickListener { confirmRevealOfflineVaultKey() }
+            }, fullWidthParams(bottom = 16))
+        }
 
         if (kyAccount?.lastSyncError != null) {
             val errorBanner = LinearLayout(this).apply {
@@ -1106,21 +1197,89 @@ class MainActivity : AppCompatActivity() {
         addAdaptiveCards(container, cards)
     }
 
+    private fun showRecycleBin() {
+        val request = ++vaultReportRequest
+        vaultReportDialog?.dismiss()
+        readPasswordVault(operation = { KdbxPasswordVault.recycledEntries(passwordVaultFile, it) }, onSuccess = report@{ entries ->
+            if (request != vaultReportRequest) return@report
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+            var dialog: AlertDialog? = null
+            if (entries.isEmpty()) list.addView(message("Recycle Bin is empty."))
+            entries.sortedBy { it.title.lowercase() }.forEach { entry ->
+                val card = settingsCard()
+                card.addView(title(entry.title))
+                card.addView(message(listOfNotNull(entry.username.takeIf { it.isNotEmpty() },
+                    if (entry.isPasskey) "Passkey" else null).joinToString(" · ")))
+                card.addView(secondaryButton("Restore to vault").apply {
+                    setOnClickListener {
+                        val currentKey = AppLockManager.getPasswordVaultKey() ?: return@setOnClickListener
+                        dialog?.dismiss()
+                        mutatePasswords(afterSave = ::showRecycleBin) { KdbxPasswordVault.restore(passwordVaultFile, currentKey, entry.id) }
+                    }
+                }, fullWidthParams(top = 8))
+                list.addView(card, fullWidthParams(bottom = 8))
+            }
+            dialog = AlertDialog.Builder(this).setTitle("Recycle Bin")
+                .setView(ScrollView(this).apply { addView(list) })
+                .setPositiveButton("Done", null).showKyDialog()
+            vaultReportDialog = dialog
+            refreshVaultReport = ::showRecycleBin
+        })
+    }
+
+    private fun showReusedPasswords() {
+        val request = ++vaultReportRequest
+        vaultReportDialog?.dismiss()
+        readPasswordVault(operation = { KdbxPasswordVault.reusedPasswords(passwordVaultFile, it) }, onSuccess = report@{ reused ->
+            if (request != vaultReportRequest) return@report
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+            if (reused.isEmpty()) list.addView(message("No reused passwords found."))
+            reused.sortedBy { it.entry.title.lowercase() }.forEach { match ->
+                list.addView(settingsCard().apply {
+                    addView(title(match.entry.title))
+                    if (match.entry.username.isNotEmpty()) addView(message(match.entry.username))
+                    addView(message("This password is used by ${match.count} live entries."))
+                }, fullWidthParams(bottom = 8))
+            }
+            vaultReportDialog = AlertDialog.Builder(this).setTitle("Reused passwords")
+                .setView(ScrollView(this).apply { addView(list) })
+                .setPositiveButton("Done", null).showKyDialog()
+            refreshVaultReport = ::showReusedPasswords
+        })
+    }
+
     private fun createLocalPasswordVault() {
-        val vaultKey = CredentialCipher.generateVaultKey()
-        runCatching {
-            KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, emptyList())
-            AppLockManager.setPasswordVaultKey(this, vaultKey)
-            passwordEntries.clear()
-        }.onSuccess {
-            Toast.makeText(this, "Local password vault created", Toast.LENGTH_SHORT).show()
-            renderContent()
-        }.onFailure {
-            AppLockManager.clearPasswordVaultKey(this)
-            vaultKey.fill(0)
-            passwordVaultFile.delete()
-            Toast.makeText(this, "Could not create the local password vault", Toast.LENGTH_LONG).show()
-        }
+        val generation = AppLockManager.lockGeneration
+        Thread {
+            val vaultKey = CredentialCipher.generateVaultKey()
+            val result = synchronized(KdbxPasswordVault) {
+                var created = false
+                runCatching {
+                    check(!passwordVaultFile.exists()) { "An existing vault must be recovered before creating another" }
+                    check(AppLockManager.isUnlocked() && AppLockManager.lockGeneration == generation) { "Vault session ended" }
+                    KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, emptyList())
+                    created = true
+                    synchronized(AppLockManager) {
+                        check(AppLockManager.lockGeneration == generation) { "Vault session ended" }
+                        AppLockManager.setPasswordVaultKey(this, vaultKey)
+                    }
+                }.onFailure {
+                    if (created) passwordVaultFile.delete()
+                    if (AppLockManager.getPasswordVaultKey() === vaultKey) AppLockManager.clearPasswordVaultKey(this)
+                    vaultKey.fill(0)
+                }
+            }
+            runOnUiThread {
+                if (AppLockManager.lockGeneration != generation) return@runOnUiThread
+                result.onSuccess {
+                    passwordEntries.clear()
+                    Toast.makeText(this, "Local password vault created", Toast.LENGTH_SHORT).show()
+                    renderContent()
+                }.onFailure {
+                    Toast.makeText(this, "Could not create local vault: ${it.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun showAddPasswordDialog() {
@@ -1175,9 +1334,8 @@ class MainActivity : AppCompatActivity() {
                         notes = notesInput.text.toString().trim().ifBlank { null },
                     )
                 }.onSuccess {
-                    passwordEntries.add(it)
-                    savePasswordEntries()
-                    renderContent()
+                    val key = AppLockManager.getPasswordVaultKey() ?: return@onSuccess
+                    mutatePasswords { KdbxPasswordVault.update(passwordVaultFile, key) { entries -> entries.add(it); true } }
                 }.onFailure {
                     Toast.makeText(this, "Account name and password are required", Toast.LENGTH_SHORT).show()
                 }
@@ -1186,6 +1344,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPasswordDetails(entry: PasswordEntry) {
+        if (!AppLockManager.isUnlocked()) return
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), dp(8))
@@ -1229,12 +1388,20 @@ class MainActivity : AppCompatActivity() {
             .setTitle(entry.title)
             .setView(container)
             .setNegativeButton("Delete") { _, _ ->
-                passwordEntries.removeAll { it.id == entry.id }
-                savePasswordEntries()
-                renderContent()
+                readPasswordVault(operation = { KdbxPasswordVault.recyclingEnabled(passwordVaultFile, it) }, onSuccess = { recycling ->
+                    AlertDialog.Builder(this)
+                        .setTitle(if (recycling) "Move to Recycle Bin?" else "Permanently delete entry?")
+                        .setMessage(if (recycling) "This entry will remain in the encrypted vault’s recycle bin." else
+                            "This vault disables recycling. This removes the entry from the current vault. Historical snapshots and backups remain unchanged.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Delete") { _, _ ->
+                            val currentKey = AppLockManager.getPasswordVaultKey() ?: return@setPositiveButton
+                            mutatePasswords { KdbxPasswordVault.delete(passwordVaultFile, currentKey, entry.id, allowPermanent = !recycling) }
+                        }.showKyDialog()
+                })
             }
 
-        if (!entry.isPasskey && entry.password.isNotBlank()) {
+        if (!entry.isPasskey && entry.password.isNotEmpty()) {
             builder.setNeutralButton("Copy") { _, _ ->
                 copySensitiveText(entry.password, 30)
                 Toast.makeText(this, "Password copied for 30 seconds", Toast.LENGTH_SHORT).show()
@@ -1423,16 +1590,13 @@ class MainActivity : AppCompatActivity() {
                 Thread {
                     runCatching {
                         val envelope = KyPasswordEnvelopeCrypto.wrapVaultKey(vaultKey, password)
-                        val version = kyPasswordClient.uploadVault(
-                            serverUrl = account.serverUrl,
-                            sessionToken = account.sessionToken,
-                            vaultFile = passwordVaultFile,
-                            expectedVersion = 0L,
-                            deviceId = account.deviceId,
-                            passwordEnvelope = envelope,
-                        )
-                        kyPasswordStore.save(account.copy(vaultVersion = version))
-                        version
+                        synchronized(KyPasswordVaultSync) {
+                            val result = KyPasswordVaultSync.sync(passwordVaultFile, vaultKey, account,
+                                kyPasswordClient, { AppLockManager.getPasswordVaultKey() === vaultKey }, envelope)
+                            check(AppLockManager.getPasswordVaultKey() === vaultKey) { "Vault session ended" }
+                            kyPasswordStore.save(account.copy(vaultVersion = result.version, lastSyncedFingerprint = result.fingerprint))
+                            result.version
+                        }
                     }.onSuccess { version ->
                         runOnUiThread {
                             Toast.makeText(this, "Local vault uploaded to KyPasswords (v$version)", Toast.LENGTH_SHORT).show()
@@ -1488,149 +1652,125 @@ class MainActivity : AppCompatActivity() {
                 renderContent()
             }
             .setPositiveButton("Unlock") { _, _ ->
-                val secret = passwordInput.text.toString().trim()
+                val secret = passwordInput.text.toString()
                 if (secret.isBlank()) {
                     Toast.makeText(this, "Password is required", Toast.LENGTH_SHORT).show()
                     showUnlockKyPasswordsDialog(account, cachedMetadata)
                     return@setPositiveButton
                 }
-
-                val progressToast = Toast.makeText(this, "Unwrapping keyfile and loading vault…", Toast.LENGTH_SHORT)
-                progressToast.show()
-
-                Thread {
-                    try {
-                        val meta = cachedMetadata ?: kyPasswordClient.fetchMetadata(account.serverUrl, account.sessionToken)
-                        val envelope = meta.passwordEnvelope ?: meta.recoveryEnvelope
-                            ?: throw IllegalStateException("No key envelope found on server")
-
-                        val vaultKey = KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, secret)
-                        AppLockManager.setPasswordVaultKey(this@MainActivity, vaultKey)
-
-                        if (meta.version > 0) {
-                            kyPasswordClient.downloadVault(account.serverUrl, account.sessionToken, passwordVaultFile)
-                        } else if (!passwordVaultFile.exists()) {
-                            KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, emptyList())
-                        }
-
-                        loadPasswordEntries()
-                        kyPasswordStore.updateSync(meta.version)
-
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "KyPasswords vault unlocked successfully", Toast.LENGTH_SHORT).show()
-                            renderContent()
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "Failed to unlock keyfile: ${e.message}", Toast.LENGTH_LONG).show()
-                            showUnlockKyPasswordsDialog(account, cachedMetadata)
-                        }
-                    }
-                }.start()
+                unlockKyPasswords(account, secret, cachedMetadata)
             }
             .showKyDialog()
     }
 
-    private fun syncKyPasswordsVault() {
-        val account = kyPasswordStore.account()
-        val vaultKey = AppLockManager.getPasswordVaultKey()
-        if (account == null || vaultKey == null) {
-            Toast.makeText(this, "Vault is not paired or unlocked", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Toast.makeText(this, "Syncing KyPasswords vault…", Toast.LENGTH_SHORT).show()
-
+    private fun unlockKyPasswords(account: KyPasswordServerAccount, secret: String, cachedMetadata: KyPasswordMetadata?) {
+        val generation = AppLockManager.lockGeneration
+        Toast.makeText(this, "Unwrapping keyfile and loading vault…", Toast.LENGTH_SHORT).show()
         Thread {
+            var candidateKey: ByteArray? = null
             try {
-                if (!passwordVaultFile.exists() || passwordVaultFile.length() == 0L) {
-                    KdbxPasswordVault.saveEntries(passwordVaultFile, vaultKey, passwordEntries)
+                val meta = cachedMetadata ?: kyPasswordClient.fetchMetadata(account.serverUrl, account.sessionToken)
+                val envelope = meta.passwordEnvelope ?: meta.recoveryEnvelope
+                    ?: error("No key envelope found on server")
+                val key = KyPasswordEnvelopeCrypto.unwrapVaultKey(envelope, secret)
+                candidateKey = key
+                fun current() = AppLockManager.lockGeneration == generation && AppLockManager.isUnlocked() &&
+                    kyPasswordStore.account()?.sessionToken == account.sessionToken
+                synchronized(KyPasswordVaultSync) {
+                    check(current()) { "Vault session ended" }
+                    synchronized(KdbxPasswordVault) {
+                        if (passwordVaultFile.exists()) KdbxPasswordVault.loadEntries(passwordVaultFile, key)
+                        else if (meta.version == 0L) KdbxPasswordVault.saveEntries(passwordVaultFile, key, emptyList())
+                        synchronized(AppLockManager) {
+                            check(current()) { "Vault session ended" }
+                            AppLockManager.setPasswordVaultKey(this@MainActivity, key)
+                        }
+                    }
+                    // A network/conflict error must not hide the resolution controls behind unlock.
+                    runCatching {
+                        KyPasswordVaultSync.sync(passwordVaultFile, key, checkNotNull(kyPasswordStore.account()),
+                            kyPasswordClient, { current() && AppLockManager.getPasswordVaultKey() === key })
+                    }.onSuccess { result ->
+                        if (current()) kyPasswordStore.updateSync(result.version, result.fingerprint)
+                    }.onFailure { error ->
+                        if (current()) kyPasswordStore.setSyncError(error.message ?: "Vault sync failed")
+                    }
                 }
+                runOnUiThread {
+                    if (!isDestroyed && current() && AppLockManager.getPasswordVaultKey() === key) {
+                        loadPasswordEntries()
+                        renderContent()
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (isDestroyed || generation != AppLockManager.lockGeneration || !AppLockManager.isUnlocked()) return@runOnUiThread
+                    Toast.makeText(this, "Failed to unlock keyfile: ${error.message}", Toast.LENGTH_LONG).show()
+                    showUnlockKyPasswordsDialog(account, cachedMetadata)
+                }
+            } finally {
+                if (AppLockManager.getPasswordVaultKey() !== candidateKey) candidateKey?.fill(0)
+            }
+        }.start()
+    }
 
-                val metadata = kyPasswordClient.fetchMetadata(account.serverUrl, account.sessionToken)
-                if (metadata.version > account.vaultVersion) {
-                    val version = kyPasswordClient.downloadVault(account.serverUrl, account.sessionToken, passwordVaultFile)
-                    loadPasswordEntries()
-                    kyPasswordStore.updateSync(version)
-                    runOnUiThread {
-                        Toast.makeText(this, "Vault updated to v$version from server", Toast.LENGTH_SHORT).show()
-                        renderContent()
-                    }
-                } else {
-                    try {
-                        val newVersion = kyPasswordClient.uploadVault(
-                            serverUrl = account.serverUrl,
-                            sessionToken = account.sessionToken,
-                            vaultFile = passwordVaultFile,
-                            expectedVersion = account.vaultVersion,
-                            deviceId = account.deviceId,
-                        )
-                        kyPasswordStore.updateSync(newVersion)
-                        runOnUiThread {
-                            Toast.makeText(this, "Vault synced to server (v$newVersion)", Toast.LENGTH_SHORT).show()
-                            renderContent()
-                        }
-                    } catch (conflict: org.kysecurity.authenticator.passwords.kypasswords.KyPasswordConflictException) {
-                        val version = kyPasswordClient.downloadVault(account.serverUrl, account.sessionToken, passwordVaultFile)
-                        val merged = KdbxPasswordVault.update(passwordVaultFile, vaultKey) { remote ->
-                            val combined = (remote.toList() + passwordEntries).distinctBy { it.id }
-                            remote.clear()
-                            remote.addAll(combined)
-                            true
-                        }
-                        passwordEntries = merged.toMutableList()
-                        val reUploadVersion = kyPasswordClient.uploadVault(
-                            serverUrl = account.serverUrl,
-                            sessionToken = account.sessionToken,
-                            vaultFile = passwordVaultFile,
-                            expectedVersion = version,
-                            deviceId = account.deviceId,
-                        )
-                        kyPasswordStore.updateSync(reUploadVersion)
-                        runOnUiThread {
-                            Toast.makeText(this, "Deconflicted & synced with server (v$reUploadVersion)", Toast.LENGTH_SHORT).show()
-                            renderContent()
-                        }
-                    }
+    private fun syncKyPasswordsVault(quiet: Boolean = false, resolution: KyPasswordVaultSync.Resolution? = null) {
+        val key = AppLockManager.getPasswordVaultKey() ?: return
+        val session = kyPasswordStore.account() ?: return
+        fun current() = AppLockManager.getPasswordVaultKey() === key &&
+            kyPasswordStore.account()?.sessionToken == session.sessionToken
+        if (!quiet) Toast.makeText(this, "Syncing KyPasswords vault…", Toast.LENGTH_SHORT).show()
+        Thread {
+            runCatching {
+                synchronized(KyPasswordVaultSync) {
+                    check(current()) { "Vault session ended" }
+                    val account = checkNotNull(kyPasswordStore.account())
+                    val result = KyPasswordVaultSync.sync(passwordVaultFile, key, account, kyPasswordClient, ::current, resolution = resolution)
+                    if (current()) kyPasswordStore.updateSync(result.version, result.fingerprint)
+                    result.version
                 }
-            } catch (auth: org.kysecurity.authenticator.passwords.kypasswords.KyPasswordAuthException) {
-                val msg = auth.message ?: "Authentication failed: session expired or device revoked"
-                kyPasswordStore.setSyncError(msg)
+            }.onSuccess { version ->
                 runOnUiThread {
-                    showSyncErrorDialog("Session Expired", "Your pairing session with KyPasswords is no longer valid. Please unpair and re-pair this device.")
-                    renderContent()
-                }
-            } catch (notFound: org.kysecurity.authenticator.passwords.kypasswords.KyPasswordNotFoundException) {
-                runCatching {
-                    val initialVersion = kyPasswordClient.uploadVault(
-                        serverUrl = account.serverUrl,
-                        sessionToken = account.sessionToken,
-                        vaultFile = passwordVaultFile,
-                        expectedVersion = 0L,
-                        deviceId = account.deviceId,
-                    )
-                    kyPasswordStore.updateSync(initialVersion)
-                    runOnUiThread {
-                        Toast.makeText(this, "Initial vault uploaded to server (v$initialVersion)", Toast.LENGTH_SHORT).show()
-                        renderContent()
-                    }
-                }.onFailure { err ->
-                    val msg = err.localizedMessage ?: err.message ?: "Initial upload failed"
-                    kyPasswordStore.setSyncError(msg)
-                    runOnUiThread {
-                        showSyncErrorDialog("Sync Failed", "Could not initialize vault on server:\n\n$msg")
+                    if (current()) {
+                        runCatching { loadPasswordEntries() }.onFailure {
+                            kyPasswordStore.setSyncError("Could not read synced vault")
+                        }
+                        if (!quiet) Toast.makeText(this, "Vault synced (v$version)", Toast.LENGTH_SHORT).show()
                         renderContent()
                     }
                 }
-            } catch (e: Exception) {
-                val msg = e.localizedMessage ?: e.message ?: "Unknown sync error"
-                kyPasswordStore.setSyncError(msg)
+            }.onFailure { error ->
+                if (current()) kyPasswordStore.setSyncError(error.message ?: "Vault sync failed")
                 runOnUiThread {
-                    showSyncErrorDialog("Sync Failed", "Could not sync with KyPasswords server:\n\n$msg")
-                    renderContent()
+                    if (current()) {
+                        if (!quiet) showSyncErrorDialog("Sync Failed", error.message ?: "Vault sync failed")
+                        renderContent()
+                    }
                 }
             }
         }.start()
+    }
+
+    private fun showResolveVaultConflict() {
+        AlertDialog.Builder(this).setTitle("Resolve vault conflict")
+            .setMessage("Choose which complete vault to keep. Export the conflict vaults first if you need entries from both versions.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Keep this device") { _, _ ->
+                confirmVaultResolution(KyPasswordVaultSync.Resolution.KEEP_DEVICE)
+            }
+            .setNeutralButton("Keep server") { _, _ ->
+                confirmVaultResolution(KyPasswordVaultSync.Resolution.KEEP_SERVER)
+            }.showKyDialog()
+    }
+
+    private fun confirmVaultResolution(resolution: KyPasswordVaultSync.Resolution) {
+        AlertDialog.Builder(this).setTitle("Replace vault version?")
+            .setMessage(if (resolution == KyPasswordVaultSync.Resolution.KEEP_DEVICE)
+                "Upload this device's complete vault over the current server version. Saved conflict copies on this device will be removed after a successful sync."
+                else "Replace this device's vault with the current server version. Local changes and saved conflict copies will be removed after a successful sync.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Replace") { _, _ -> syncKyPasswordsVault(resolution = resolution) }
+            .showKyDialog()
     }
 
     private fun showSyncErrorDialog(title: String, message: String) {
@@ -1648,12 +1788,20 @@ class MainActivity : AppCompatActivity() {
             .setMessage("Are you sure you want to unpair from KyPasswords? This will remove the local password keyfile and lock the password vault.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Unpair") { _, _ ->
-                kyPasswordStore.clear()
-                AppLockManager.clearPasswordVaultKey(this)
-                passwordEntries.clear()
-                passwordVaultFile.delete()
-                Toast.makeText(this, "KyPasswords server unpaired", Toast.LENGTH_SHORT).show()
-                renderContent()
+                Thread {
+                    synchronized(KdbxPasswordVault) {
+                        kyPasswordStore.clear()
+                        AppLockManager.clearPasswordVaultKey(this)
+                        passwordVaultFile.delete()
+                        KyPasswordVaultSync.clearConflicts(filesDir)
+                    }
+                    runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
+                        passwordEntries.clear()
+                        Toast.makeText(this, "KyPasswords server unpaired", Toast.LENGTH_SHORT).show()
+                        renderContent()
+                    }
+                }.start()
             }
             .showKyDialog()
     }
@@ -1958,6 +2106,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        securitySection.addView(secondaryButton("Auto-lock after ${idleMinutes()} minutes").apply {
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity).setTitle("Auto-lock when inactive")
+                    .setItems(IdleLock.minutes.map { "$it minutes" }.toTypedArray()) { _, index ->
+                        idlePreferences.edit().putInt("idle_lock_minutes", IdleLock.minutes[index]).apply()
+                        AppLockManager.idleLock.reset()
+                        renderContent()
+                    }.showKyDialog()
+            }
+        }, fullWidthParams(bottom = 8))
         securitySection.addView(pinSwitch)
 
         val btnChangePin = secondaryButton(getString(R.string.change_pin)).apply {
@@ -2168,24 +2326,50 @@ class MainActivity : AppCompatActivity() {
     // ==========================================
 
     private fun unlockVault(unlock: () -> Boolean, onError: () -> Unit) {
+        if (isVaultLoading) return
+        val generation = AppLockManager.lockGeneration
+        vaultLoadGeneration = generation
         isVaultLoading = true
         renderVaultUnlocking()
         Thread {
-            val success = runCatching {
-                check(unlock())
-                loadTotpEntries()
-                loadPasswordEntries()
-            }.isSuccess
+            val result = runCatching {
+                synchronized(AppLockManager) {
+                    check(generation == AppLockManager.lockGeneration)
+                    check(unlock())
+                }
+                val totpKey = checkNotNull(AppLockManager.getVaultKey())
+                val totp = KdbxTotpVault.loadEntries(vaultFile, totpKey)
+                val passwords = AppLockManager.getPasswordVaultKey()?.let {
+                    KdbxPasswordVault.loadEntries(passwordVaultFile, it)
+                }.orEmpty()
+                totp to passwords
+            }
             runOnUiThread {
+                if (vaultLoadGeneration != generation) return@runOnUiThread
+                vaultLoadGeneration = null
                 isVaultLoading = false
-                // onStop may have locked while this thread was loading; do not resurrect the vault.
-                if (!AppLockManager.isUnlocked()) {
-                    totpEntries.clear()
-                    passwordEntries.clear()
+                if (generation != AppLockManager.lockGeneration) {
                     renderContent()
                     return@runOnUiThread
                 }
-                if (success) renderContent() else onError()
+                if (!AppLockManager.isUnlocked()) {
+                    onError()
+                    return@runOnUiThread
+                }
+                result.onSuccess { (totp, passwords) ->
+                    totpEntries = totp.toMutableList()
+                    passwordEntries = passwords.toMutableList()
+                    pendingTotpEntry?.let { entry ->
+                        pendingTotpEntry = null
+                        runCatching { addTotpEntry(entry) }.onFailure {
+                            Toast.makeText(this, "Could not save scanned account", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    renderContent()
+                }.onFailure {
+                    lockSensitiveState()
+                    onError()
+                }
             }
         }.start()
     }
@@ -2215,10 +2399,12 @@ class MainActivity : AppCompatActivity() {
         onError: (String) -> Unit = {},
     ) {
         if (silent && !VaultUnlockPrompt.canAuthenticate(this)) return
+        val generation = AppLockManager.lockGeneration
         VaultUnlockPrompt.show(
             activity = this,
             subtitle = reason,
             onAuthenticated = { cipher ->
+                if (isDestroyed || generation != AppLockManager.lockGeneration) return@show
                 unlockVault(
                     unlock = { AppLockManager.unlockWithBiometrics(this, cipher) },
                     onError = {
@@ -2237,6 +2423,7 @@ class MainActivity : AppCompatActivity() {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {},
     ) {
+        val generation = AppLockManager.lockGeneration
         val biometricManager = BiometricManager.from(this)
         val canAuthenticate = biometricManager.canAuthenticate(
             BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
@@ -2247,7 +2434,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) = onSuccess()
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                if (!isDestroyed && generation == AppLockManager.lockGeneration) onSuccess()
+            }
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 if (!silent) onError("Unlock required: $errString")
             }
@@ -2393,7 +2582,7 @@ class MainActivity : AppCompatActivity() {
             }
             layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply { marginStart = dp(2); marginEnd = dp(2) }
             setOnClickListener {
-                AppLockManager.lock()
+                lockSensitiveState()
                 renderContent()
             }
         })
@@ -2403,6 +2592,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun AlertDialog.Builder.showKyDialog(): AlertDialog {
         return create().apply {
+            openDialogs.add(this)
+            setOnDismissListener {
+                openDialogs.remove(this)
+                if (vaultReportDialog === this) {
+                    vaultReportDialog = null
+                    refreshVaultReport = null
+                }
+            }
             val background = GradientDrawable().apply {
                 setColor(ThemeManager.color(this@MainActivity, R.color.ky_surface))
                 setStroke(dp(1), ThemeManager.color(this@MainActivity, R.color.ky_border))
@@ -2436,6 +2633,19 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             show()
+            window?.let { dialogWindow ->
+                val original = dialogWindow.callback
+                dialogWindow.callback = object : android.view.Window.Callback by original {
+                    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                        if (event.action == android.view.MotionEvent.ACTION_DOWN && !recordVaultActivity()) return true
+                        return original.dispatchTouchEvent(event)
+                    }
+                    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                        if (event.action == android.view.KeyEvent.ACTION_DOWN && !recordVaultActivity()) return true
+                        return original.dispatchKeyEvent(event)
+                    }
+                }
+            }
         }
     }
 
@@ -2522,10 +2732,26 @@ class MainActivity : AppCompatActivity() {
         })
     }.apply { layoutParams = fullWidthParams() }
 
+    private fun dismissSensitiveDialogs() {
+        openDialogs.toList().forEach { dialog ->
+            fun clear(view: View) {
+                if (view is TextView) view.text = ""
+                if (view is ViewGroup) for (index in 0 until view.childCount) clear(view.getChildAt(index))
+            }
+            dialog.window?.decorView?.let(::clear)
+            dialog.dismiss()
+        }
+    }
+
     private fun lockSensitiveState() {
         AppLockManager.lock()
+        isVaultLoading = false
+        vaultLoadGeneration = null
+        pendingTotpEntry = null
+        dismissSensitiveDialogs()
         totpEntries.clear()
         passwordEntries.clear()
+        totpViews.clear()
         copiedSensitiveLabel?.let { label ->
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             if (clipboard.primaryClipDescription?.label == label) clipboard.clearPrimaryClip()

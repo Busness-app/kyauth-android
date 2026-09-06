@@ -55,6 +55,8 @@ dependencies {
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.google.firebase:firebase-messaging:25.1.2")
     implementation("app.keemobile:kotpass:0.13.0")
+    // Already a kotpass runtime dependency; expose its binary-reference types at compile time.
+    compileOnly("com.squareup.okio:okio-jvm:3.15.0")
     // Argon2id for KyPasswords envelopes. kotpass bundles Argon2 but keeps it `internal`, and a
     // native (NDK) Argon2 would push the interop vector test into androidTest, which CI does not
     // run. BouncyCastle's lightweight API is pure Java, so the vector is checked on every push.

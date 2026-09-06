@@ -66,10 +66,38 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   arbitrary app would hand one site's credential to another.
 - Password fill matches an entry's domain or its subdomains, never a parent or sibling, and never
   across a public suffix. Passkey matching is exact on RP ID.
-- Every incremental vault mutation goes through `KdbxPasswordVault.update`, one serialized
-  read-modify-write. `loadEntries` throws on a vault it cannot decode; callers must never turn that
-  into an empty list.
+- Incremental password/passkey edits use `KdbxPasswordVault.update`; delete uses its serialized
+  `delete` operation. Both mutate the decoded KDBX by UUID, retaining groups, unknown fields,
+  attachments, history and metadata. `saveEntries` only creates a new file. Existing empty or
+  unreadable files fail closed. Live reads exclude the metadata-identified recycle bin and its
+  descendants. Disabled recycling requires explicit permanent-delete confirmation. User edits
+  honor the file's history item/content-size budgets; signCount-only updates add no history.
+  Password vault reads and mutations run on worker threads; only their results reach the UI.
+- `KyPasswordVaultSync` serializes sync sessions and uploads immutable encrypted snapshots.
+  Downloads are decoded before installation under the local vault monitor. A remote replacement
+  requires an unchanged local file and a known clean sync fingerprint. Unknown or dirty state,
+  concurrent local writes and HTTP 409 preserve encrypted versions in `password-vault-conflicts`
+  and surface a conflict; they never merge UI projections or automatically overwrite either side.
+  Byte-identical local/remote files establish a missing baseline on upgrade. Explicit resolution
+  chooses the whole device or server vault, guarded by If-Match and local-change detection.
+  Clean successful syncs and unpairing remove conflict copies; startup/sync sweeps interrupted
+  snapshots. Unpair clears the account, key and files in one vault transaction, so a new local
+  vault cannot overtake teardown. A validated master-password key is adopted before sync, so network errors leave
+  local access and conflict resolution available.
+  Passwords can export those files; revealing their opening key uses the existing authenticated offline-key flow. Local wipe
+  removes the conflict files along with all app-private files.
 - The Passwords tab supports pairing with KyPasswords, syncing vaults, local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
+- The Passwords Recycle Bin is a metadata-only deleted-entry view, including descendants and
+  untitled/non-password records. Restore moves the intact original entry to the live root; it
+  preserves the UUID and all contents. There is no purge action. App lock clears and dismisses
+  open dialogs, including unsaved forms and revealed secrets.
+- Reused passwords compares exact nonempty strings across all live KDBX records, including
+  whitespace-only passwords and untitled records. Its results contain metadata and counts only;
+  passwords are never logged or sent. Open recovery/reuse views refresh after vault reloads.
+- Foreground idle locking defaults to five minutes, configurable to 1/5/15/30/60 minutes in
+  Settings. It uses elapsed realtime, includes dialog activity, and checks expiry before accepting
+  new input. Background locking remains immediate. Lock generations reject stale asynchronous
+  unlock/reveal results; only the UI thread installs loaded entry lists.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
 
 ## UI contract
@@ -111,7 +139,13 @@ Run unit tests, lint, the debug build, and compile device tests:
 
 ```bash
 ./gradlew test lintDebug assembleDebug compileDebugAndroidTestSources
+npm ci --prefix tools --ignore-scripts
+pip install argon2-cffi==25.1.0
+node tools/vault_preservation.js app/build/interop
 ```
+
+`KdbxPreservationTest` writes the Android round-trip outputs consumed by the Node verifier.
+Regenerate the fake-secret rich fixtures with `node tools/vault_preservation.js generate`.
 
 ## Outstanding security work
 
