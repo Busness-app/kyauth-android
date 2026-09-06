@@ -1,15 +1,20 @@
 **Repo:** kyauth-android (paired with kypassword-server)
+**PR:** #7 — https://github.com/Busness-app/kyauth-android/pull/7
 **Worktree:** /home/yoshi/busness.app/kyauth-android (branch main)
 
 # KDBX preservation and mobile feature parity plan
 
-Planning complete; implementation has not started. Inspected Android commit
+Implementation completed in merged PR #7. This plan records the original approach;
+see `2026-09-05-vault-parity-verification.md` for results and physical-device limits.
+Mobile CSV import was removed from scope at Yoshi's request on 2026-09-06.
+
+Original planning baseline: inspected Android commit
 `f0a6f1621bda4a7c20824b42c057c44a15e59380`. No runtime reproduction or Android
 checks were run for this planning-only change.
 
 Source handoff: https://myslop.urlxl.us/f/kyauth-kypassword-vault-parity (post 455).
 The handoff's ordering is right: establish lossless persistence before adding views
-or import features. Deliver preservation as the first focused PR, followed by
+and feature work. Deliver preservation as the first focused PR, followed by
 separate feature changes.
 
 ## Findings confirmed in the checkout
@@ -132,11 +137,11 @@ Compare exact nonempty passwords across all live records; case and whitespace
 remain significant, including space-only values. Return entry IDs/counts and keep
 passwords out of logs, telemetry and network requests. Ensure the report can label
 records excluded by today's password-card model without losing their identity.
-Recompute after mutations, restore and sync, and after imports if later added.
+Recompute after mutations, restore and sync.
 Test empty, space-only, case-different and recycled values. Clear report state on
 lock and retain existing authentication for reveal/copy.
 
-## 4. Native lock review; CSV remains conditional
+## 4. Native lock review
 
 Review idle behavior and dialogs without copying browser session machinery.
 `onStop` already locks except during configuration changes; verify backgrounding,
@@ -147,20 +152,12 @@ Define any foreground idle-timeout change against the merged web contract before
 implementation; the handoff supplies no timeout value. Record actual device
 observations separately from compiled device tests.
 
-No mobile CSV importer was found in the inspected password UI. Do not introduce
-one solely for this handoff's conditional item. If CSV import is separately
-selected, compare title/username/password/URL/notes/TOTP across live entries and
-selected rows, preserve password whitespace, skip exact duplicates by default
-with opt-out, ignore unchecked rows as duplicate seeds, and create no groups when
-every selected row is skipped. Never route by the name Recycle Bin.
-
 ## References and boundaries
 
-Use merged server PRs [31](https://github.com/Busness-app/kypassword-server/pull/31),
-[32](https://github.com/Busness-app/kypassword-server/pull/32) and
+Use merged server PRs [32](https://github.com/Busness-app/kypassword-server/pull/32) and
 [33](https://github.com/Busness-app/kypassword-server/pull/33) as behavior references.
 The handoff identifies `frontend/src/lib/kdbx.ts`, `recycleBin.test.ts`,
-`passwordReuse.ts`, `passwordReuse.test.ts`, `csvImport.ts` and `csvImport.test.ts`
+`passwordReuse.ts` and `passwordReuse.test.ts`
 in `/home/yoshi/busness.app/kypassword-server-recycle-bin`; read the current merged
 versions before implementing each feature. Refresh repo state and instructions
 before starting implementation.
@@ -169,6 +166,5 @@ Retain lowercase-hex vault credentials, existing Argon2id envelope validation,
 size limits, authentication-bound keys and lock/wipe behavior. Do not bundle SCIM,
 server backups, FCM work, passkey enrollment or provider API migrations.
 
-Next action: implement the rich cross-library preservation regression, then the
-first PR. The handoff remains open for that implementation; planning does not
-close the product work.
+Implementation and merge are complete. Physical-device verification remains the
+next verification task; see the verification note for the outstanding limits.
