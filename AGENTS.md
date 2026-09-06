@@ -90,6 +90,13 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   untitled/non-password records. Restore moves the intact original entry to the live root; it
   preserves the UUID and all contents. There is no purge action. App lock clears and dismisses
   open dialogs, including unsaved forms and revealed secrets.
+- Reused passwords compares exact nonempty strings across all live KDBX records, including
+  whitespace-only passwords and untitled records. Its results contain metadata and counts only;
+  passwords are never logged or sent. Open recovery/reuse views refresh after vault reloads.
+- Foreground idle locking defaults to five minutes, configurable to 1/5/15/30/60 minutes in
+  Settings. It uses elapsed realtime, includes dialog activity, and checks expiry before accepting
+  new input. Background locking remains immediate. Lock generations reject stale asynchronous
+  unlock/reveal results; only the UI thread installs loaded entry lists.
 - Copied passwords are marked sensitive and clear after 30 seconds or when KyAuth locks.
 
 ## UI contract

@@ -73,6 +73,7 @@ import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordPairingParse
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordServerAccount
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordVaultSync
 import org.kysecurity.authenticator.passwords.kypasswords.KyPasswordStore
+import org.kysecurity.authenticator.security.IdleLock
 import org.kysecurity.authenticator.security.AppLockManager
 import org.kysecurity.authenticator.security.CredentialCipher
 import org.kysecurity.authenticator.security.VaultUnlockPrompt
@@ -117,6 +118,12 @@ class MainActivity : AppCompatActivity() {
     private val executor: Executor by lazy { ContextCompat.getMainExecutor(this) }
     private val handler = Handler(Looper.getMainLooper())
     private val openDialogs = mutableSetOf<AlertDialog>()
+    private var vaultReportDialog: AlertDialog? = null
+    private var vaultReportRequest = 0L
+    private var refreshVaultReport: (() -> Unit)? = null
+    private val idlePreferences by lazy { getSharedPreferences("app_lock", MODE_PRIVATE) }
+    private fun idleMinutes() = IdleLock.validatedMinutes(idlePreferences.getInt("idle_lock_minutes", 5))
+    private fun idleTimeoutMillis() = idleMinutes() * 60_000L
 
     private var activeTab = Tab.TOTP
     private var pendingChallenge: MfaChallenge? = null
@@ -125,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     private var passwordEntries = mutableListOf<PasswordEntry>()
     private var copiedSensitiveLabel: String? = null
     private var isVaultLoading = false
+    private var vaultLoadGeneration: Long? = null
     private data class TotpViews(
         val entry: TotpEntry,
         val code: TextView,
@@ -137,6 +145,10 @@ class MainActivity : AppCompatActivity() {
 
     private val ticker = object : Runnable {
         override fun run() {
+            if (AppLockManager.isUnlocked() && AppLockManager.idleLock.expired(android.os.SystemClock.elapsedRealtime(), idleTimeoutMillis())) {
+                lockSensitiveState()
+                renderContent()
+            }
             if (!isVaultLoading && AppLockManager.isUnlocked() && activeTab == Tab.TOTP) {
                 updateTotpViews()
             }
@@ -175,12 +187,38 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) lockSensitiveState()
+        if (!isChangingConfigurations) {
+            lockSensitiveState()
+            renderContent()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(ticker)
+        vaultLoadGeneration = null
+        dismissSensitiveDialogs()
+        passwordEntries.clear()
+        totpEntries.clear()
+        totpViews.clear()
+    }
+
+    private fun recordVaultActivity(): Boolean {
+        if (!AppLockManager.isUnlocked()) return true
+        if (AppLockManager.idleLock.activity(android.os.SystemClock.elapsedRealtime(), idleTimeoutMillis())) return true
+        lockSensitiveState()
+        renderContent()
+        return false
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.action == android.view.MotionEvent.ACTION_DOWN && !recordVaultActivity()) return true
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN && !recordVaultActivity()) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -918,7 +956,7 @@ class MainActivity : AppCompatActivity() {
                 operation(key)
             }
             runOnUiThread {
-                if (AppLockManager.getPasswordVaultKey() !== key) return@runOnUiThread
+                if (isDestroyed || AppLockManager.getPasswordVaultKey() !== key) return@runOnUiThread
                 result.onSuccess(onSuccess).onFailure {
                     Toast.makeText(this, "Password vault operation failed: ${it.message}", Toast.LENGTH_LONG).show()
                 }
@@ -930,6 +968,7 @@ class MainActivity : AppCompatActivity() {
         readPasswordVault(operation = { KdbxPasswordVault.loadEntries(passwordVaultFile, it) }, onSuccess = {
             passwordEntries = it.toMutableList()
             renderContent()
+            if (vaultReportDialog?.isShowing == true) refreshVaultReport?.invoke()
         })
     }
 
@@ -940,6 +979,7 @@ class MainActivity : AppCompatActivity() {
         }, onSuccess = { entries ->
             passwordEntries = entries.toMutableList()
             renderContent()
+            if (vaultReportDialog?.isShowing == true) refreshVaultReport?.invoke()
             afterSave()
             if (kyPasswordStore.account() != null) syncKyPasswordsVault(quiet = true)
         })
@@ -1025,6 +1065,10 @@ class MainActivity : AppCompatActivity() {
 
         container.addView(secondaryButton("Recycle Bin").apply {
             setOnClickListener { showRecycleBin() }
+        }, fullWidthParams(bottom = 12))
+
+        container.addView(secondaryButton("Reused passwords").apply {
+            setOnClickListener { showReusedPasswords() }
         }, fullWidthParams(bottom = 12))
 
         val conflictFiles = File(filesDir, "password-vault-conflicts").listFiles()?.filter { it.extension == "kdbx" }.orEmpty()
@@ -1154,7 +1198,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRecycleBin() {
-        readPasswordVault(operation = { KdbxPasswordVault.recycledEntries(passwordVaultFile, it) }, onSuccess = { entries ->
+        val request = ++vaultReportRequest
+        vaultReportDialog?.dismiss()
+        readPasswordVault(operation = { KdbxPasswordVault.recycledEntries(passwordVaultFile, it) }, onSuccess = report@{ entries ->
+            if (request != vaultReportRequest) return@report
             val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
             var dialog: AlertDialog? = null
             if (entries.isEmpty()) list.addView(message("Recycle Bin is empty."))
@@ -1175,6 +1222,29 @@ class MainActivity : AppCompatActivity() {
             dialog = AlertDialog.Builder(this).setTitle("Recycle Bin")
                 .setView(ScrollView(this).apply { addView(list) })
                 .setPositiveButton("Done", null).showKyDialog()
+            vaultReportDialog = dialog
+            refreshVaultReport = ::showRecycleBin
+        })
+    }
+
+    private fun showReusedPasswords() {
+        val request = ++vaultReportRequest
+        vaultReportDialog?.dismiss()
+        readPasswordVault(operation = { KdbxPasswordVault.reusedPasswords(passwordVaultFile, it) }, onSuccess = report@{ reused ->
+            if (request != vaultReportRequest) return@report
+            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
+            if (reused.isEmpty()) list.addView(message("No reused passwords found."))
+            reused.sortedBy { it.entry.title.lowercase() }.forEach { match ->
+                list.addView(settingsCard().apply {
+                    addView(title(match.entry.title))
+                    if (match.entry.username.isNotEmpty()) addView(message(match.entry.username))
+                    addView(message("This password is used by ${match.count} live entries."))
+                }, fullWidthParams(bottom = 8))
+            }
+            vaultReportDialog = AlertDialog.Builder(this).setTitle("Reused passwords")
+                .setView(ScrollView(this).apply { addView(list) })
+                .setPositiveButton("Done", null).showKyDialog()
+            refreshVaultReport = ::showReusedPasswords
         })
     }
 
@@ -1274,6 +1344,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPasswordDetails(entry: PasswordEntry) {
+        if (!AppLockManager.isUnlocked()) return
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), dp(8))
@@ -1330,7 +1401,7 @@ class MainActivity : AppCompatActivity() {
                 })
             }
 
-        if (!entry.isPasskey && entry.password.isNotBlank()) {
+        if (!entry.isPasskey && entry.password.isNotEmpty()) {
             builder.setNeutralButton("Copy") { _, _ ->
                 copySensitiveText(entry.password, 30)
                 Toast.makeText(this, "Password copied for 30 seconds", Toast.LENGTH_SHORT).show()
@@ -2032,6 +2103,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        securitySection.addView(secondaryButton("Auto-lock after ${idleMinutes()} minutes").apply {
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity).setTitle("Auto-lock when inactive")
+                    .setItems(IdleLock.minutes.map { "$it minutes" }.toTypedArray()) { _, index ->
+                        idlePreferences.edit().putInt("idle_lock_minutes", IdleLock.minutes[index]).apply()
+                        AppLockManager.idleLock.reset()
+                        renderContent()
+                    }.showKyDialog()
+            }
+        }, fullWidthParams(bottom = 8))
         securitySection.addView(pinSwitch)
 
         val btnChangePin = secondaryButton(getString(R.string.change_pin)).apply {
@@ -2242,24 +2323,50 @@ class MainActivity : AppCompatActivity() {
     // ==========================================
 
     private fun unlockVault(unlock: () -> Boolean, onError: () -> Unit) {
+        if (isVaultLoading) return
+        val generation = AppLockManager.lockGeneration
+        vaultLoadGeneration = generation
         isVaultLoading = true
         renderVaultUnlocking()
         Thread {
-            val success = runCatching {
-                check(unlock())
-                loadTotpEntries()
-                loadPasswordEntries()
-            }.isSuccess
+            val result = runCatching {
+                synchronized(AppLockManager) {
+                    check(generation == AppLockManager.lockGeneration)
+                    check(unlock())
+                }
+                val totpKey = checkNotNull(AppLockManager.getVaultKey())
+                val totp = KdbxTotpVault.loadEntries(vaultFile, totpKey)
+                val passwords = AppLockManager.getPasswordVaultKey()?.let {
+                    KdbxPasswordVault.loadEntries(passwordVaultFile, it)
+                }.orEmpty()
+                totp to passwords
+            }
             runOnUiThread {
+                if (vaultLoadGeneration != generation) return@runOnUiThread
+                vaultLoadGeneration = null
                 isVaultLoading = false
-                // onStop may have locked while this thread was loading; do not resurrect the vault.
-                if (!AppLockManager.isUnlocked()) {
-                    totpEntries.clear()
-                    passwordEntries.clear()
+                if (generation != AppLockManager.lockGeneration) {
                     renderContent()
                     return@runOnUiThread
                 }
-                if (success) renderContent() else onError()
+                if (!AppLockManager.isUnlocked()) {
+                    onError()
+                    return@runOnUiThread
+                }
+                result.onSuccess { (totp, passwords) ->
+                    totpEntries = totp.toMutableList()
+                    passwordEntries = passwords.toMutableList()
+                    pendingTotpEntry?.let { entry ->
+                        pendingTotpEntry = null
+                        runCatching { addTotpEntry(entry) }.onFailure {
+                            Toast.makeText(this, "Could not save scanned account", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    renderContent()
+                }.onFailure {
+                    lockSensitiveState()
+                    onError()
+                }
             }
         }.start()
     }
@@ -2289,10 +2396,12 @@ class MainActivity : AppCompatActivity() {
         onError: (String) -> Unit = {},
     ) {
         if (silent && !VaultUnlockPrompt.canAuthenticate(this)) return
+        val generation = AppLockManager.lockGeneration
         VaultUnlockPrompt.show(
             activity = this,
             subtitle = reason,
             onAuthenticated = { cipher ->
+                if (isDestroyed || generation != AppLockManager.lockGeneration) return@show
                 unlockVault(
                     unlock = { AppLockManager.unlockWithBiometrics(this, cipher) },
                     onError = {
@@ -2311,6 +2420,7 @@ class MainActivity : AppCompatActivity() {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {},
     ) {
+        val generation = AppLockManager.lockGeneration
         val biometricManager = BiometricManager.from(this)
         val canAuthenticate = biometricManager.canAuthenticate(
             BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
@@ -2321,7 +2431,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         BiometricPrompt(this, executor, object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) = onSuccess()
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                if (!isDestroyed && generation == AppLockManager.lockGeneration) onSuccess()
+            }
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 if (!silent) onError("Unlock required: $errString")
             }
@@ -2478,7 +2590,13 @@ class MainActivity : AppCompatActivity() {
     private fun AlertDialog.Builder.showKyDialog(): AlertDialog {
         return create().apply {
             openDialogs.add(this)
-            setOnDismissListener { openDialogs.remove(this) }
+            setOnDismissListener {
+                openDialogs.remove(this)
+                if (vaultReportDialog === this) {
+                    vaultReportDialog = null
+                    refreshVaultReport = null
+                }
+            }
             val background = GradientDrawable().apply {
                 setColor(ThemeManager.color(this@MainActivity, R.color.ky_surface))
                 setStroke(dp(1), ThemeManager.color(this@MainActivity, R.color.ky_border))
@@ -2512,6 +2630,19 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             show()
+            window?.let { dialogWindow ->
+                val original = dialogWindow.callback
+                dialogWindow.callback = object : android.view.Window.Callback by original {
+                    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                        if (event.action == android.view.MotionEvent.ACTION_DOWN && !recordVaultActivity()) return true
+                        return original.dispatchTouchEvent(event)
+                    }
+                    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                        if (event.action == android.view.KeyEvent.ACTION_DOWN && !recordVaultActivity()) return true
+                        return original.dispatchKeyEvent(event)
+                    }
+                }
+            }
         }
     }
 
@@ -2598,8 +2729,7 @@ class MainActivity : AppCompatActivity() {
         })
     }.apply { layoutParams = fullWidthParams() }
 
-    private fun lockSensitiveState() {
-        AppLockManager.lock()
+    private fun dismissSensitiveDialogs() {
         openDialogs.toList().forEach { dialog ->
             fun clear(view: View) {
                 if (view is TextView) view.text = ""
@@ -2608,6 +2738,14 @@ class MainActivity : AppCompatActivity() {
             dialog.window?.decorView?.let(::clear)
             dialog.dismiss()
         }
+    }
+
+    private fun lockSensitiveState() {
+        AppLockManager.lock()
+        isVaultLoading = false
+        vaultLoadGeneration = null
+        pendingTotpEntry = null
+        dismissSensitiveDialogs()
         totpEntries.clear()
         passwordEntries.clear()
         totpViews.clear()
