@@ -39,6 +39,8 @@ jobs:
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
+          target: google_apis
+          profile: pixel_6
           arch: x86_64
           script: |
             adb shell settings put system screen_off_timeout 2147483647
