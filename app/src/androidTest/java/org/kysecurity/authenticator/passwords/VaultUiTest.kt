@@ -9,6 +9,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -32,9 +33,15 @@ class VaultUiTest {
         file.delete()
         KdbxPasswordVault.saveEntries(file, key, listOf(entry))
         PairingStore(context).save(PairedAccount("https://example.test", "fixture-device", "Fixture"))
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            instrumentation.uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
         // Test-only state injection keeps this test independent of biometric hardware.
-        for ((field, value) in mapOf("activeVaultKey" to key.copyOf(), "activePasswordVaultKey" to key.copyOf(), "isUnlocked" to true)) {
-            AppLockManager::class.java.getDeclaredField(field).apply { isAccessible = true }.set(AppLockManager, value)
+        instrumentation.runOnMainSync {
+            for ((field, value) in mapOf("activeVaultKey" to key.copyOf(), "activePasswordVaultKey" to key.copyOf(), "isUnlocked" to true)) {
+                AppLockManager::class.java.getDeclaredField(field).apply { isAccessible = true }.set(AppLockManager, value)
+            }
         }
     }
 
@@ -83,9 +90,12 @@ class VaultUiTest {
                 secretView = texts(checkNotNull(dialog.window).decorView).single { it.text.toString() == "fixture secret" }
             }
             scenario.moveToState(Lifecycle.State.CREATED)
-            assertFalse(AppLockManager.isUnlocked())
-            assertFalse(dialog.isShowing)
-            assertEquals("", secretView.text.toString())
+            // ActivityScenario observes super.onStop before our override finishes clearing views.
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                assertFalse(AppLockManager.isUnlocked())
+                assertFalse(dialog.isShowing)
+                assertEquals("", secretView.text.toString())
+            }
         }
     }
 }
