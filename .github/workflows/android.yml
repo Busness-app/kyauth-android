@@ -41,5 +41,7 @@ jobs:
           api-level: 35
           arch: x86_64
           script: |
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell wm dismiss-keyguard
             adb shell locksettings set-pin 246810
             ./gradlew connectedDebugAndroidTest
