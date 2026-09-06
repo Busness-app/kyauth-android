@@ -1154,8 +1154,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRecycleBin() {
-        val key = AppLockManager.getPasswordVaultKey() ?: return
-        runCatching { KdbxPasswordVault.recycledEntries(passwordVaultFile, key) }.onSuccess { entries ->
+        readPasswordVault(operation = { KdbxPasswordVault.recycledEntries(passwordVaultFile, it) }, onSuccess = { entries ->
             val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(8)) }
             var dialog: AlertDialog? = null
             if (entries.isEmpty()) list.addView(message("Recycle Bin is empty."))
@@ -1168,8 +1167,7 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener {
                         val currentKey = AppLockManager.getPasswordVaultKey() ?: return@setOnClickListener
                         dialog?.dismiss()
-                        mutatePasswords { KdbxPasswordVault.restore(passwordVaultFile, currentKey, entry.id) }
-                        showRecycleBin()
+                        mutatePasswords(afterSave = ::showRecycleBin) { KdbxPasswordVault.restore(passwordVaultFile, currentKey, entry.id) }
                     }
                 }, fullWidthParams(top = 8))
                 list.addView(card, fullWidthParams(bottom = 8))
@@ -1177,7 +1175,7 @@ class MainActivity : AppCompatActivity() {
             dialog = AlertDialog.Builder(this).setTitle("Recycle Bin")
                 .setView(ScrollView(this).apply { addView(list) })
                 .setPositiveButton("Done", null).showKyDialog()
-        }.onFailure { Toast.makeText(this, "Could not read Recycle Bin: ${it.message}", Toast.LENGTH_LONG).show() }
+        })
     }
 
     private fun createLocalPasswordVault() {

@@ -63,19 +63,37 @@ class VaultUiTest {
         if (view is ViewGroup) for (i in 0 until view.childCount) addAll(texts(view.getChildAt(i)))
     }
 
+    private fun awaitDialog(scenario: ActivityScenario<MainActivity>, text: String) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 30_000
+        do {
+            var found = false
+            scenario.onActivity { activity ->
+                found = dialogs(activity).any { dialog -> texts(checkNotNull(dialog.window).decorView).any { it.text.toString() == text } }
+            }
+            if (found) return
+            Thread.sleep(25)
+        } while (android.os.SystemClock.elapsedRealtime() < deadline)
+        fail("Dialog did not show: $text")
+    }
+
     @Test fun recycleViewRestoresTheOriginalEntry() {
         KdbxPasswordVault.delete(file, key, entry.id)
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
+                assertTrue("Fixture activity must be unlocked", AppLockManager.isUnlocked())
                 invoke(activity, "showRecycleBin")
+            }
+            awaitDialog(scenario, "Restore to vault")
+            scenario.onActivity { activity ->
                 val dialog = dialogs(activity).single()
                 val text = texts(checkNotNull(dialog.window).decorView)
                 assertTrue(text.any { it.text.toString() == "Restore me" })
                 assertFalse(text.any { it.text.toString() == "fixture secret" })
                 text.single { it.text.toString() == "Restore to vault" }.performClick()
-                assertEquals(entry, KdbxPasswordVault.loadEntries(file, key).single())
-                assertTrue(KdbxPasswordVault.recycledEntries(file, key).isEmpty())
             }
+            awaitDialog(scenario, "Recycle Bin is empty.")
+            assertEquals(entry, KdbxPasswordVault.loadEntries(file, key).single())
+            assertTrue(KdbxPasswordVault.recycledEntries(file, key).isEmpty())
         }
     }
 
@@ -84,6 +102,7 @@ class VaultUiTest {
             lateinit var secretView: TextView
             lateinit var dialog: AlertDialog
             scenario.onActivity { activity ->
+                assertTrue("Fixture activity must be unlocked", AppLockManager.isUnlocked())
                 MainActivity::class.java.getDeclaredMethod("showPasswordDetails", PasswordEntry::class.java)
                     .apply { isAccessible = true }.invoke(activity, entry)
                 dialog = dialogs(activity).single()
