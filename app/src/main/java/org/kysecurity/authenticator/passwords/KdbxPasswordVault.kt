@@ -7,6 +7,7 @@ import app.keemobile.kotpass.database.KeePassDatabase
 import app.keemobile.kotpass.database.decode
 import app.keemobile.kotpass.database.encode
 import app.keemobile.kotpass.database.modifiers.modifyContent
+import app.keemobile.kotpass.database.modifiers.binaries
 import app.keemobile.kotpass.database.modifiers.moveEntry
 import app.keemobile.kotpass.database.modifiers.removeEntry
 import app.keemobile.kotpass.database.modifiers.withHistory
@@ -91,7 +92,7 @@ object KdbxPasswordVault {
         database.content.group.traverse { existingIds.add(it.uuid) }
         val additions = entries.filter { it.id !in before }.map {
             require(UUID.fromString(it.id) !in existingIds) { "Entry UUID already exists outside the live password list" }
-            patch(Entry(uuid = UUID.fromString(it.id)), null, it)
+            patch(Entry(uuid = UUID.fromString(it.id)), null, it, database)
         }
         val removed = before.keys - after.keys
         removed.forEach { database = deleteRecord(database, UUID.fromString(it), allowPermanent = false) }
@@ -99,7 +100,7 @@ object KdbxPasswordVault {
             entries = group.entries.map { original ->
                 val old = before[original.uuid.toString()]
                 val changed = after[original.uuid.toString()]
-                if (old != null && changed != null && old != changed) patch(original, old, changed) else original
+                if (old != null && changed != null && old != changed) patch(original, old, changed, database) else original
             },
             groups = group.groups.map(::patchGroup),
         )
@@ -120,7 +121,7 @@ object KdbxPasswordVault {
         else update(vaultFile, vaultKey) { it.addAll(entries); true }
     }
 
-    private fun patch(original: Entry, old: PasswordEntry?, changed: PasswordEntry): Entry {
+    private fun patch(original: Entry, old: PasswordEntry?, changed: PasswordEntry, database: KeePassDatabase): Entry {
         val fields = original.fields.toMutableMap()
         fun set(name: String, before: String?, after: String?, secret: Boolean = false) {
             if (old != null && before == after) return
@@ -142,7 +143,28 @@ object KdbxPasswordVault {
         val result = original.copy(fields = EntryFields(fields), times = original.times?.copy(
             lastModificationTime = Instant.now(), lastAccessTime = Instant.now(),
         ) ?: TimeData.create())
-        return if (old == null) result else original.withHistory { result }
+        if (old == null) return result
+        val counterOnly = old.passkey != null && changed.passkey != null &&
+            old.copy(passkey = old.passkey.copy(signCount = changed.passkey.signCount)) == changed
+        if (counterOnly) return result
+        val meta = database.content.meta
+        val history = original.withHistory { result }.history.let {
+            if (meta.historyMaxItems >= 0) it.takeLast(meta.historyMaxItems) else it
+        }
+        var totalBytes = 0L
+        val retained = history.asReversed().takeWhile { entry ->
+            // Approximate uncompressed entry content plus referenced attachment bytes. This is a
+            // history budget, not the encrypted file ceiling; -1 explicitly requests no limit.
+            totalBytes += 256L + entry.fields.entries.sumOf { (name, value) ->
+                name.toByteArray().size.toLong() + value.content.toByteArray().size
+            } + entry.tags.sumOf { it.toByteArray().size.toLong() } +
+                entry.customData.toString().toByteArray().size + entry.autoType.toString().toByteArray().size +
+                entry.overrideUrl.toByteArray().size + entry.binaries.sumOf {
+                    (database.binaries[it.hash]?.getContent()?.size ?: 0).toLong() + it.name.toByteArray().size
+                }
+            meta.historyMaxSize < 0 || totalBytes <= meta.historyMaxSize
+        }.asReversed()
+        return result.copy(history = retained)
     }
 
     @Synchronized

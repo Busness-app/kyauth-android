@@ -5,6 +5,7 @@ import app.keemobile.kotpass.database.Credentials
 import app.keemobile.kotpass.database.KeePassDatabase
 import app.keemobile.kotpass.database.decode
 import app.keemobile.kotpass.database.encode
+import app.keemobile.kotpass.database.modifiers.modifyContent
 import java.io.File
 import org.junit.Assert.*
 import org.junit.Test
@@ -62,6 +63,40 @@ class KdbxPreservationTest {
         file.writeBytes(byteArrayOf())
         assertThrows(IllegalArgumentException::class.java) { KdbxPasswordVault.update(file, key) { it.clear(); true } }
         assertEquals(0L, file.length())
+    }
+
+    @Test fun countersDoNotCreateHistoryAndUserEditsHonorConfiguredLimits() {
+        val file = fixture()
+        val passkey = PasswordEntry("Counter", "", passkey = PasskeyData("example.test", "", byteArrayOf(1), byteArrayOf(2), byteArrayOf(3)))
+        KdbxPasswordVault.update(file, key) { it.add(passkey); true }
+        val sizeBefore = file.length()
+        repeat(200) {
+            KdbxPasswordVault.update(file, key) { entries ->
+                val index = entries.indexOfFirst { it.id == passkey.id }
+                val entry = entries[index]
+                entries[index] = entry.copy(passkey = entry.passkey!!.copy(signCount = it + 1)); true
+            }
+        }
+        var db = KdbxPasswordVault.decode(file.readBytes(), key)
+        assertTrue(db.content.group.entries.single { it.uuid.toString() == passkey.id }.history.isEmpty())
+        assertTrue(file.length() < sizeBefore + 1024)
+        db = db.modifyContent { copy(meta = meta.copy(historyMaxItems = 2, historyMaxSize = 1024)) }
+        file.outputStream().use { db.encode(it) }
+        repeat(5) { iteration ->
+            KdbxPasswordVault.update(file, key) { entries ->
+                val index = entries.indexOfFirst { it.id == passkey.id }
+                entries[index] = entries[index].copy(username = "name-$iteration"); true
+            }
+        }
+        db = KdbxPasswordVault.decode(file.readBytes(), key)
+        assertTrue(db.content.group.entries.single { it.uuid.toString() == passkey.id }.history.size <= 2)
+        db = db.modifyContent { copy(meta = meta.copy(historyMaxSize = 0)) }
+        file.outputStream().use { db.encode(it) }
+        KdbxPasswordVault.update(file, key) { entries ->
+            val index = entries.indexOfFirst { it.id == passkey.id }
+            entries[index] = entries[index].copy(username = "last name"); true
+        }
+        assertTrue(KdbxPasswordVault.decode(file.readBytes(), key).content.group.entries.single { it.uuid.toString() == passkey.id }.history.isEmpty())
     }
 
     @Test fun webFixtureSurvivesAndroidMutation() {

@@ -57,6 +57,9 @@ class KyPasswordVaultSyncTest {
     @Test fun upload409PreservesFullLocalAndRemoteFilesAndDoesNotRetryUpload() {
         val file = folder.newFile("vault.kdbx").apply { writeBytes(fixture()) }
         val before = file.readBytes()
+        val remoteFile = folder.newFile("server.kdbx").apply { writeBytes(before) }
+        KdbxPasswordVault.update(remoteFile, key) { it[0] = it[0].copy(username = "server change"); true }
+        val remote = remoteFile.readBytes()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         var uploads = 0
         server.createContext("/api/vault/metadata") { e ->
@@ -72,7 +75,7 @@ class KyPasswordVaultSyncTest {
         }
         server.createContext("/api/vault/kdbx") { e ->
             e.responseHeaders.add("X-Vault-Version", "2")
-            e.sendResponseHeaders(200, before.size.toLong()); e.responseBody.use { it.write(before) }
+            e.sendResponseHeaders(200, remote.size.toLong()); e.responseBody.use { it.write(remote) }
         }
         server.start()
         try {
@@ -85,6 +88,53 @@ class KyPasswordVaultSyncTest {
             assertEquals(1, uploads)
             assertArrayEquals(before, file.readBytes())
             assertTrue(File(folder.root, "password-vault-conflicts").listFiles()!!.isNotEmpty())
+            assertFalse(folder.root.listFiles()!!.any { it.name.startsWith(".vault-") })
+        } finally { server.stop(0) }
+    }
+
+    @Test fun migrationAdoptsIdenticalBytesAndExplicitChoicesResolveDifferentCopies() {
+        val file = folder.newFile("vault.kdbx").apply { writeBytes(fixture()) }
+        var remote = file.readBytes()
+        var version = 1L
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/vault/metadata") { e ->
+            val response = """{"version":$version}""".toByteArray()
+            e.sendResponseHeaders(200, response.size.toLong()); e.responseBody.use { it.write(response) }
+        }
+        server.createContext("/api/vault/kdbx") { e ->
+            e.responseHeaders.add("X-Vault-Version", "$version")
+            e.sendResponseHeaders(200, remote.size.toLong()); e.responseBody.use { it.write(remote) }
+        }
+        server.createContext("/api/vault/upload") { e ->
+            assertEquals("\"$version\"", e.requestHeaders.getFirst("If-Match"))
+            remote = e.requestBody.use { it.readBytes() }; version++
+            val response = """{"metadata":{"version":$version}}""".toByteArray()
+            e.sendResponseHeaders(200, response.size.toLong()); e.responseBody.use { it.write(response) }
+        }
+        server.start()
+        try {
+            val account = KyPasswordServerAccount("http://127.0.0.1:${server.address.port}", "device", "token", "user", vaultVersion = 1)
+            val conflicts = File(folder.root, "password-vault-conflicts")
+            val stale = folder.newFile(".vault-upload-interrupted.kdbx")
+            fun sync(resolution: KyPasswordVaultSync.Resolution? = null) = synchronized(KyPasswordVaultSync) {
+                KyPasswordVaultSync.sync(file, key, account, KyPasswordClient(), { true }, resolution = resolution)
+            }
+            val migrated = sync()
+            assertEquals(KyPasswordVaultSync.fingerprint(remote), migrated.fingerprint)
+            assertFalse(conflicts.exists())
+            assertFalse(stale.exists())
+            KdbxPasswordVault.update(file, key) { it[0] = it[0].copy(username = "device edit"); true }
+            assertTrue(runCatching { sync() }.isFailure)
+            assertTrue(conflicts.exists())
+            sync(KyPasswordVaultSync.Resolution.KEEP_DEVICE)
+            assertArrayEquals(file.readBytes(), remote)
+            assertFalse(conflicts.exists())
+            KdbxPasswordVault.update(file, key) { it[0] = it[0].copy(username = "another edit"); true }
+            assertTrue(runCatching { sync() }.isFailure)
+            sync(KyPasswordVaultSync.Resolution.KEEP_SERVER)
+            assertArrayEquals(remote, file.readBytes())
+            assertFalse(conflicts.exists())
+            assertFalse(folder.root.listFiles()!!.any { it.name.startsWith(".vault-") })
         } finally { server.stop(0) }
     }
 }

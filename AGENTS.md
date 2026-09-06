@@ -70,12 +70,17 @@ KyAuth pairs an Android device with KySignOn. It stores TOTP entries in an encry
   `delete` operation. Both mutate the decoded KDBX by UUID, retaining groups, unknown fields,
   attachments, history and metadata. `saveEntries` only creates a new file. Existing empty or
   unreadable files fail closed. Live reads exclude the metadata-identified recycle bin and its
-  descendants. Disabled recycling requires explicit permanent-delete confirmation.
+  descendants. Disabled recycling requires explicit permanent-delete confirmation. User edits
+  honor the file's history item/content-size budgets; signCount-only updates add no history.
+  Password vault reads and mutations run on worker threads; only their results reach the UI.
 - `KyPasswordVaultSync` serializes sync sessions and uploads immutable encrypted snapshots.
   Downloads are decoded before installation under the local vault monitor. A remote replacement
   requires an unchanged local file and a known clean sync fingerprint. Unknown or dirty state,
   concurrent local writes and HTTP 409 preserve encrypted versions in `password-vault-conflicts`
   and surface a conflict; they never merge UI projections or automatically overwrite either side.
+  Byte-identical local/remote files establish a missing baseline on upgrade. Explicit resolution
+  chooses the whole device or server vault, guarded by If-Match and local-change detection.
+  Clean successful syncs remove resolved conflict copies; startup/sync sweeps interrupted snapshots.
   Passwords can export those files; revealing their opening key uses the existing authenticated offline-key flow. Local wipe
   removes the conflict files along with all app-private files.
 - The Passwords tab supports pairing with KyPasswords, syncing vaults, local add, generate, list, reveal, copy, and delete actions with distinct Passkey badging. Reveal and copy require a biometric or device-authentication prompt.
